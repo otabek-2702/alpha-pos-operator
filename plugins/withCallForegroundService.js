@@ -3,6 +3,7 @@ const {
   withAndroidManifest,
   withMainActivity,
   withDangerousMod,
+  withProjectBuildGradle,
 } = require('@expo/config-plugins');
 const fs = require('fs');
 const path = require('path');
@@ -214,10 +215,45 @@ const withServiceAutostart = (config) =>
     return cfg;
   });
 
+const EXCLUDE_MARKER = "exclude group: 'com.android.support'";
+
+const withExcludeLegacySupport = (config) =>
+  withProjectBuildGradle(config, (cfg) => {
+    if (cfg.modResults.language !== 'groovy') {
+      throw new Error(
+        'withCallForegroundService: project build.gradle is not Groovy; cannot patch.'
+      );
+    }
+    let contents = cfg.modResults.contents;
+    if (contents.includes(EXCLUDE_MARKER)) {
+      return cfg; // already patched
+    }
+
+    // react-native-call-detection drags in com.android.support:appcompat-v7,
+    // whose resources collide with androidx (duplicate attr/actionBarSize) and
+    // break :app:mergeReleaseResources. The app is androidx-only, so drop the
+    // entire legacy support group across all subprojects.
+    const block =
+      '\n    configurations.all {\n' +
+      `        ${EXCLUDE_MARKER}\n` +
+      '    }\n';
+
+    if (contents.includes('allprojects {')) {
+      contents = contents.replace('allprojects {', `allprojects {${block}`);
+    } else {
+      // No allprojects block (unexpected) — append a standalone one.
+      contents += `\nallprojects {${block}}\n`;
+    }
+
+    cfg.modResults.contents = contents;
+    return cfg;
+  });
+
 /** @param {import('@expo/config-plugins').ExpoConfig} config */
 module.exports = function withCallForegroundService(config) {
   config = withManifest(config);
   config = withServiceSource(config);
   config = withServiceAutostart(config);
+  config = withExcludeLegacySupport(config);
   return config;
 };
