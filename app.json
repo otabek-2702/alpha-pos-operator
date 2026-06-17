@@ -1,0 +1,46 @@
+{
+  "expo": {
+    "name": "AlphaPOS Operator Link",
+    "slug": "alphapos-operator-link",
+    "scheme": "alphaposlink",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": false,
+    "assetBundlePatterns": ["**/*"],
+    "android": {
+      "package": "com.alphapos.operatorlink",
+      "versionCode": 1,
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.READ_PHONE_STATE",
+        "android.permission.READ_CALL_LOG",
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ]
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.alphapos.operatorlink"
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "AlphaPOS Operator Link uses the camera to scan the POS pairing QR code.",
+          "recordAudioAndroid": false
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true,
+            "minSdkVersion": 24
+          }
+        }
+      ],
+      "./plugins/withCallForegroundService"
+    ]
+  }
+}
