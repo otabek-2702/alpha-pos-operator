@@ -139,6 +139,37 @@ Open the installed **AlphaPOS Operator Link** dev build on the phone; it
 connects to Metro over the LAN (or scan the QR shown in the terminal). Grant the
 camera and phone permissions when prompted, then scan the POS pairing QR.
 
+### Build with your account, no login prompt (token)
+
+For repeatable builds without typing your password each time, authenticate with
+an Expo access token instead of an interactive login:
+
+1. Create a token at <https://expo.dev/settings/access-tokens> → **Create
+   token** (a Personal Access Token — treat it like a password).
+2. Copy `.env.example` to `.env` and paste the token:
+
+   ```
+   EXPO_TOKEN=your_token_here
+   ```
+
+   `.env` is git-ignored — it never leaves your machine and is never committed.
+3. Link the project once (uses the token, no password prompt):
+
+   ```bash
+   npx dotenv -e .env -- eas init
+   ```
+
+4. Build via the npm scripts (each loads `.env` then runs EAS non-interactively):
+
+   ```bash
+   npm run build:preview   # standalone APK, runs without Metro (operator phone)
+   npm run build:dev       # dev client (needs `npx expo start --dev-client`)
+   npm run build:prod      # production app bundle (.aab)
+   ```
+
+The first build auto-generates EAS-managed Android signing credentials — no
+keystore setup required.
+
 ### Alternative: local build (no EAS cloud)
 
 Requires Android Studio + SDK and a connected device/emulator. This runs

@@ -7,7 +7,10 @@
     "android": "expo run:android",
     "prebuild": "expo prebuild --platform android --clean",
     "tsc": "tsc --noEmit",
-    "ios": "expo run:ios"
+    "ios": "expo run:ios",
+    "build:preview": "dotenv -e .env -- eas build --profile preview --platform android --non-interactive",
+    "build:dev": "dotenv -e .env -- eas build --profile development --platform android --non-interactive",
+    "build:prod": "dotenv -e .env -- eas build --profile production --platform android --non-interactive"
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "1.23.1",
@@ -23,6 +26,7 @@
   "devDependencies": {
     "@babel/core": "^7.25.2",
     "@types/react": "~18.3.12",
+    "dotenv-cli": "^11.0.0",
     "typescript": "~5.3.3"
   },
   "private": true

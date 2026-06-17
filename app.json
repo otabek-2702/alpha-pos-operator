@@ -7,7 +7,9 @@
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "newArchEnabled": false,
-    "assetBundlePatterns": ["**/*"],
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "android": {
       "package": "com.alphapos.operatorlink",
       "versionCode": 1,
@@ -41,6 +43,12 @@
         }
       ],
       "./plugins/withCallForegroundService"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "d596eb89-da57-4d61-91c9-4e49b70ca387"
+      }
+    },
+    "owner": "adrian_2702"
   }
 }
