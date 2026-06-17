@@ -42,7 +42,9 @@
           }
         }
       ],
-      "./plugins/withCallForegroundService"
+      "./plugins/withCallForegroundService",
+      "expo-asset",
+      "expo-font"
     ],
     "extra": {
       "eas": {
