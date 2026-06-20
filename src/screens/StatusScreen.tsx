@@ -20,6 +20,7 @@ export interface StatusScreenProps {
   log: CallLogEntry[];
   permissionGranted: boolean | null;
   onRepair: () => void;
+  onSendTest: () => void;
 }
 
 const STATUS_META: Record<WsStatus, { label: string; color: string }> = {
@@ -49,6 +50,7 @@ export function StatusScreen({
   log,
   permissionGranted,
   onRepair,
+  onSendTest,
 }: StatusScreenProps) {
   const meta = STATUS_META[status];
 
@@ -100,6 +102,18 @@ export function StatusScreen({
           />
         )}
       </View>
+
+      <TouchableOpacity
+        style={[styles.repairButton, styles.testButton]}
+        onPress={onSendTest}
+        disabled={status !== 'connected'}
+      >
+        <Text style={styles.repairText}>
+          {status === 'connected'
+            ? 'Send test event to POS'
+            : 'Connect to send a test event'}
+        </Text>
+      </TouchableOpacity>
 
       <TouchableOpacity style={styles.repairButton} onPress={onRepair}>
         <Text style={styles.repairText}>Re-pair (scan a new QR)</Text>
@@ -222,11 +236,15 @@ const styles = StyleSheet.create({
     backgroundColor: '#1e293b',
   },
   repairButton: {
-    marginTop: 18,
+    marginTop: 12,
     backgroundColor: '#1e293b',
     borderRadius: 12,
     paddingVertical: 16,
     alignItems: 'center',
+  },
+  testButton: {
+    marginTop: 18,
+    backgroundColor: '#0e7490',
   },
   repairText: {
     color: '#f8fafc',

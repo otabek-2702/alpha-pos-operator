@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { PermissionsAndroid, Platform } from 'react-native';
+import { Platform } from 'react-native';
 import CallDetectorManager, { type CallEvent } from 'react-native-call-detection';
 
 import type { OutboundMessage } from './useWebSocket';
@@ -32,38 +32,24 @@ export interface CallLogEntry {
 /** Keep only the most recent N events for the live status log. */
 const MAX_LOG = 10;
 
-async function requestCallPermissions(): Promise<boolean> {
-  if (Platform.OS !== 'android') return false;
-  // These constants are always defined on Android at runtime; the RN typings
-  // mark them optional, so assert their presence.
-  const READ_PHONE_STATE = PermissionsAndroid.PERMISSIONS.READ_PHONE_STATE!;
-  const READ_CALL_LOG = PermissionsAndroid.PERMISSIONS.READ_CALL_LOG!;
-  try {
-    const result = await PermissionsAndroid.requestMultiple([
-      READ_PHONE_STATE,
-      READ_CALL_LOG,
-    ]);
-    return (
-      result[READ_PHONE_STATE] === PermissionsAndroid.RESULTS.GRANTED &&
-      result[READ_CALL_LOG] === PermissionsAndroid.RESULTS.GRANTED
-    );
-  } catch {
-    return false;
-  }
-}
-
 export interface UseCallBridgeResult {
   /** Last ~10 events emitted to the desktop, newest first. */
   log: CallLogEntry[];
-  /** null = not yet resolved, true = granted, false = denied / unsupported. */
-  permissionGranted: boolean | null;
 }
 
+/**
+ * @param send     outbound websocket sender
+ * @param enabled  true once the required call permissions are granted. The
+ *                 native detector is only created while this is true; it is
+ *                 torn down and recreated if the value changes. Permissions are
+ *                 requested centrally (see PermissionsScreen / permissions.ts),
+ *                 not here, so the dialogs no longer collide with the camera one.
+ */
 export function useCallBridge(
-  send: (message: OutboundMessage) => boolean
+  send: (message: OutboundMessage) => boolean,
+  enabled: boolean
 ): UseCallBridgeResult {
   const [log, setLog] = useState<CallLogEntry[]>([]);
-  const [permissionGranted, setPermissionGranted] = useState<boolean | null>(null);
 
   // Always call through the latest `send` even though the detector is created
   // once. (`send` from useWebSocket changes identity when the URL changes.)
@@ -78,14 +64,12 @@ export function useCallBridge(
   const logSeq = useRef(0);
 
   useEffect(() => {
-    // Call detection is Android-only. On other platforms the bridge is inert.
-    if (Platform.OS !== 'android') {
-      setPermissionGranted(false);
+    // Call detection is Android-only and only runs once permissions are granted.
+    if (Platform.OS !== 'android' || !enabled) {
       return;
     }
 
     let detector: CallDetectorManager | null = null;
-    let disposed = false;
 
     const pushLog = (entry: CallLogEntry) =>
       setLog((prev) => [entry, ...prev].slice(0, MAX_LOG));
@@ -151,30 +135,21 @@ export function useCallBridge(
       }
     };
 
-    (async () => {
-      const granted = await requestCallPermissions();
-      if (disposed) return;
-      setPermissionGranted(granted);
-      if (!granted) return;
-
-      detector = new CallDetectorManager(
-        handleCall,
-        true, // readPhoneNumberAndroid — supply the number on Android
-        () => {
-          // Native-side permission denial.
-          setPermissionGranted(false);
-        },
-        {
-          title: 'Phone access required',
-          message:
-            'AlphaPOS Operator Link needs phone state and call-log access to ' +
-            'read the caller number and send it to the POS desktop.',
-        }
-      );
-    })();
+    detector = new CallDetectorManager(
+      handleCall,
+      true, // readPhoneNumberAndroid — supply the number on Android
+      () => {
+        // Native-side permission denial (should not happen once gated).
+      },
+      {
+        title: 'Phone access required',
+        message:
+          'AlphaPOS Operator Link needs phone state and call-log access to ' +
+          'read the caller number and send it to the POS desktop.',
+      }
+    );
 
     return () => {
-      disposed = true;
       if (detector) {
         try {
           detector.dispose();
@@ -184,7 +159,7 @@ export function useCallBridge(
         detector = null;
       }
     };
-  }, []);
+  }, [enabled]);
 
-  return { log, permissionGranted };
+  return { log };
 }

@@ -1,8 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  PermissionsAndroid,
-  Platform,
+  AppState,
   StatusBar,
   StyleSheet,
   View,
@@ -11,43 +10,64 @@ import {
 import { useCallBridge } from './src/hooks/useCallBridge';
 import { useWebSocket } from './src/hooks/useWebSocket';
 import { PairScreen } from './src/screens/PairScreen';
+import { PermissionsScreen } from './src/screens/PermissionsScreen';
 import { StatusScreen } from './src/screens/StatusScreen';
+import {
+  checkPermissions,
+  hasRequiredPermissions,
+  PermissionState,
+} from './src/permissions';
 import { clearDesktopUrl, loadDesktopUrl, saveDesktopUrl } from './src/storage';
 
 /**
  * Root component.
  *
- * - On launch, loads the saved desktop URL and auto-reconnects if present.
- * - Renders the QR PairScreen when unpaired, the StatusScreen when paired.
- * - The call bridge runs for the app's lifetime so detection works while
- *   backgrounded (kept alive by the foreground service). Events only leave the
- *   device once paired and connected; otherwise they are buffered.
+ * Screen order:
+ *   1. PermissionsScreen — until camera + phone + call-log are granted.
+ *   2. PairScreen        — QR scanner, when no desktop URL is saved.
+ *   3. StatusScreen      — once paired.
+ *
+ * The call bridge runs for the app's lifetime (kept alive by the foreground
+ * service) but only emits while paired and connected; otherwise events buffer.
  */
 export default function App() {
   const [url, setUrl] = useState<string | null>(null);
+  const [perms, setPerms] = useState<PermissionState | null>(null);
+  const [gateDone, setGateDone] = useState(false);
   const [ready, setReady] = useState(false);
 
-  // Load any previously paired desktop URL.
+  // Initial load: saved URL + current permission grants.
   useEffect(() => {
     (async () => {
-      setUrl(await loadDesktopUrl());
+      const [savedUrl, current] = await Promise.all([
+        loadDesktopUrl(),
+        checkPermissions(),
+      ]);
+      setUrl(savedUrl);
+      setPerms(current);
+      // Returning users who already granted everything skip the gate.
+      if (hasRequiredPermissions(current)) setGateDone(true);
       setReady(true);
     })();
   }, []);
 
-  // Android 13+ requires a runtime prompt for the foreground-service notification.
+  // Re-check permissions whenever the app returns to the foreground (e.g. after
+  // the user toggled something in system settings).
+  const appState = useRef(AppState.currentState);
   useEffect(() => {
-    if (Platform.OS === 'android' && Number(Platform.Version) >= 33) {
-      PermissionsAndroid.request(
-        PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS!
-      ).catch(() => {
-        // Non-fatal: the service still runs; the notification is just silent.
-      });
-    }
+    const sub = AppState.addEventListener('change', (next) => {
+      if (appState.current.match(/inactive|background/) && next === 'active') {
+        checkPermissions().then(setPerms);
+      }
+      appState.current = next;
+    });
+    return () => sub.remove();
   }, []);
 
+  const callEnabled = perms ? hasRequiredPermissions(perms) : false;
+
   const { status, send } = useWebSocket(url);
-  const { log, permissionGranted } = useCallBridge(send);
+  const { log } = useCallBridge(send, callEnabled);
 
   const handlePaired = async (next: string) => {
     await saveDesktopUrl(next);
@@ -59,6 +79,13 @@ export default function App() {
     setUrl(null);
   };
 
+  // Sends a synthetic incoming call to verify the desktop pipe end-to-end.
+  const handleSendTest = () => {
+    const phone = '+10000000000';
+    send({ type: 'call_start', phone, direction: 'in' });
+    setTimeout(() => send({ type: 'call_end', phone }), 1500);
+  };
+
   if (!ready) {
     return (
       <View style={styles.loading}>
@@ -68,16 +95,26 @@ export default function App() {
     );
   }
 
+  const showGate = !gateDone;
+
   return (
     <View style={styles.root}>
       <StatusBar barStyle="light-content" backgroundColor="#0b1120" />
-      {url ? (
+      {showGate ? (
+        <PermissionsScreen
+          onReady={async () => {
+            setPerms(await checkPermissions());
+            setGateDone(true);
+          }}
+        />
+      ) : url ? (
         <StatusScreen
           url={url}
           status={status}
           log={log}
-          permissionGranted={permissionGranted}
+          permissionGranted={callEnabled}
           onRepair={handleRepair}
+          onSendTest={handleSendTest}
         />
       ) : (
         <PairScreen onPaired={handlePaired} />
