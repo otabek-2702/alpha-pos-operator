@@ -25,6 +25,8 @@ const MAX_QUEUE = 20;
 
 export interface UseWebSocketResult {
   status: WsStatus;
+  /** Number of events buffered while disconnected, waiting to flush. */
+  queuedCount: number;
   /**
    * Sends a message if connected, otherwise buffers it (when a URL is paired).
    * Returns true if the message went out on the wire immediately.
@@ -34,34 +36,41 @@ export interface UseWebSocketResult {
 
 export function useWebSocket(url: string | null): UseWebSocketResult {
   const [status, setStatus] = useState<WsStatus>('disconnected');
+  const [queuedCount, setQueuedCount] = useState(0);
 
   // Live socket and the pending-send buffer. Refs survive reconnects and
   // re-renders so a queued event outlives the socket that failed to send it.
   const wsRef = useRef<WebSocket | null>(null);
   const queueRef = useRef<OutboundMessage[]>([]);
 
+  const syncCount = useCallback(() => setQueuedCount(queueRef.current.length), []);
+
   // Keep the latest URL accessible inside the stable `send` callback.
   const urlRef = useRef<string | null>(url);
   urlRef.current = url;
 
-  const send = useCallback((message: OutboundMessage): boolean => {
-    const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      try {
-        ws.send(JSON.stringify(message));
-        return true;
-      } catch {
-        // Fall through to buffering.
+  const send = useCallback(
+    (message: OutboundMessage): boolean => {
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify(message));
+          return true;
+        } catch {
+          // Fall through to buffering.
+        }
       }
-    }
-    // Only buffer while we have somewhere to eventually send it.
-    if (urlRef.current) {
-      const queue = queueRef.current;
-      queue.push(message);
-      if (queue.length > MAX_QUEUE) queue.shift();
-    }
-    return false;
-  }, []);
+      // Only buffer while we have somewhere to eventually send it.
+      if (urlRef.current) {
+        const queue = queueRef.current;
+        queue.push(message);
+        if (queue.length > MAX_QUEUE) queue.shift();
+        syncCount();
+      }
+      return false;
+    },
+    [syncCount]
+  );
 
   useEffect(() => {
     if (!url) {
@@ -88,6 +97,7 @@ export function useWebSocket(url: string | null): UseWebSocketResult {
           break;
         }
       }
+      syncCount();
     };
 
     const scheduleReconnect = () => {
@@ -155,7 +165,7 @@ export function useWebSocket(url: string | null): UseWebSocketResult {
       }
       setStatus('disconnected');
     };
-  }, [url]);
+  }, [url, syncCount]);
 
-  return { status, send };
+  return { status, queuedCount, send };
 }

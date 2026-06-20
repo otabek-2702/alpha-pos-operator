@@ -32,9 +32,18 @@ export interface CallLogEntry {
 /** Keep only the most recent N events for the live status log. */
 const MAX_LOG = 10;
 
+/** A call currently in progress, used to drive the live "active call" banner. */
+export interface ActiveCall {
+  phone: string;
+  direction: 'in' | 'out';
+  startedAt: number;
+}
+
 export interface UseCallBridgeResult {
   /** Last ~10 events emitted to the desktop, newest first. */
   log: CallLogEntry[];
+  /** The call currently in progress, or null. */
+  activeCall: ActiveCall | null;
 }
 
 /**
@@ -50,6 +59,7 @@ export function useCallBridge(
   enabled: boolean
 ): UseCallBridgeResult {
   const [log, setLog] = useState<CallLogEntry[]>([]);
+  const [activeCall, setActiveCall] = useState<ActiveCall | null>(null);
 
   // Always call through the latest `send` even though the detector is created
   // once. (`send` from useWebSocket changes identity when the URL changes.)
@@ -96,6 +106,7 @@ export function useCallBridge(
           outgoingInProgress.current = false;
           activePhone.current = phone;
           emit({ type: 'call_start', phone, direction: 'in' });
+          setActiveCall({ phone, direction: 'in', startedAt: Date.now() });
           break;
         }
 
@@ -109,6 +120,7 @@ export function useCallBridge(
             const outPhone = phone || activePhone.current;
             activePhone.current = outPhone;
             emit({ type: 'call_start', phone: outPhone, direction: 'out' });
+            setActiveCall({ phone: outPhone, direction: 'out', startedAt: Date.now() });
           }
           break;
         }
@@ -126,6 +138,7 @@ export function useCallBridge(
           incomingInProgress.current = false;
           outgoingInProgress.current = false;
           activePhone.current = '';
+          setActiveCall(null);
           break;
         }
 
@@ -158,8 +171,9 @@ export function useCallBridge(
         }
         detector = null;
       }
+      setActiveCall(null);
     };
   }, [enabled]);
 
-  return { log };
+  return { log, activeCall };
 }
