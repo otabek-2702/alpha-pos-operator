@@ -38,7 +38,7 @@ export default function App() {
 }
 
 function Root() {
-  const [fontsLoaded] = useFonts({
+  const [fontsLoaded, fontError] = useFonts({
     HankenGrotesk_400Regular,
     HankenGrotesk_500Medium,
     HankenGrotesk_600SemiBold,
@@ -95,7 +95,8 @@ function Root() {
     setTimeout(() => send({ type: 'call_end', phone }), 1500);
   };
 
-  const showSplash = !fontsLoaded || !ready;
+  // Don't hang on the splash if fonts fail to load — fall back to system fonts.
+  const showSplash = (!fontsLoaded && !fontError) || !ready;
 
   let content: React.ReactNode;
   if (showSplash) {

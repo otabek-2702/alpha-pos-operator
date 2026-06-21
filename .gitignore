@@ -22,3 +22,7 @@ npm-debug.*
 # Local env / secrets
 .env
 .env.local
+
+# Design handoff bundle + sample APKs (local only)
+_handoff/
+*.apk

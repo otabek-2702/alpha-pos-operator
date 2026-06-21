@@ -1,11 +1,12 @@
 {
   "expo": {
-    "name": "AlphaPOS Operator Link",
+    "name": "Operator",
     "slug": "alphapos-operator-link",
     "scheme": "alphaposlink",
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
+    "icon": "./assets/icon.png",
     "newArchEnabled": false,
     "assetBundlePatterns": [
       "**/*"
@@ -13,6 +14,11 @@
     "android": {
       "package": "com.alphapos.operatorlink",
       "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-foreground.png",
+        "backgroundImage": "./assets/adaptive-background.png",
+        "backgroundColor": "#6D89FC"
+      },
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.READ_PHONE_STATE",
