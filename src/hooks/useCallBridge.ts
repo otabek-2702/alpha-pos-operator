@@ -68,8 +68,14 @@ export function useCallBridge(
 
   // Sequence-tracking state for direction inference. Refs, not state, because
   // the native callback must read/write them synchronously without re-renders.
-  const incomingInProgress = useRef(false);
-  const outgoingInProgress = useRef(false);
+  //
+  // callActive: a call_start has been emitted and not yet ended. While true we
+  //   IGNORE any new "Incoming"/"Offhook" — that's call waiting (a second caller
+  //   ringing in mid-call) and must NOT overwrite the number sent to the POS.
+  // answered: the active call reached "Offhook" (picked up). Used to tell a
+  //   genuine missed primary call apart from a call-waiting miss.
+  const callActive = useRef(false);
+  const answered = useRef(false);
   const activePhone = useRef('');
   const logSeq = useRef(0);
 
@@ -95,15 +101,25 @@ export function useCallBridge(
       });
     };
 
+    const reset = () => {
+      callActive.current = false;
+      answered.current = false;
+      activePhone.current = '';
+      setActiveCall(null);
+    };
+
     const handleCall = (event: CallEvent, rawNumber?: string | null) => {
       const phone = (rawNumber ?? '').toString().trim();
 
       switch (event) {
         case 'Incoming': {
-          // Incoming ring. The number is required to be useful to the POS.
+          // A new ring. If a call is already active this is CALL WAITING — a
+          // second caller interrupting the one the operator is handling. Ignore
+          // it so the POS keeps the original caller's number.
+          if (callActive.current) break;
           if (!phone) break;
-          incomingInProgress.current = true;
-          outgoingInProgress.current = false;
+          callActive.current = true;
+          answered.current = false;
           activePhone.current = phone;
           emit({ type: 'call_start', phone, direction: 'in' });
           setActiveCall({ phone, direction: 'in', startedAt: Date.now() });
@@ -111,34 +127,41 @@ export function useCallBridge(
         }
 
         case 'Offhook': {
-          if (incomingInProgress.current) {
-            // The earlier incoming call was answered — already announced.
-            if (phone) activePhone.current = phone;
-          } else {
-            // No preceding ring => the operator placed an outgoing call.
-            outgoingInProgress.current = true;
-            const outPhone = phone || activePhone.current;
-            activePhone.current = outPhone;
-            emit({ type: 'call_start', phone: outPhone, direction: 'out' });
-            setActiveCall({ phone: outPhone, direction: 'out', startedAt: Date.now() });
+          if (callActive.current) {
+            // The active incoming call was answered (or a call-waiting swap).
+            // Already announced — just mark it answered. Do NOT change the number.
+            answered.current = true;
+            break;
           }
+          // No active call => the operator placed an outgoing call.
+          const outPhone = phone || activePhone.current;
+          if (!outPhone) break;
+          callActive.current = true;
+          answered.current = true;
+          activePhone.current = outPhone;
+          emit({ type: 'call_start', phone: outPhone, direction: 'out' });
+          setActiveCall({ phone: outPhone, direction: 'out', startedAt: Date.now() });
           break;
         }
 
-        case 'Disconnected':
-        case 'Missed': {
-          // End the call only if one was actually being tracked.
-          if (
-            incomingInProgress.current ||
-            outgoingInProgress.current ||
-            activePhone.current
-          ) {
-            emit({ type: 'call_end', phone: phone || activePhone.current });
+        case 'Disconnected': {
+          // Phone went idle => the (last) call ended. End the tracked call.
+          if (callActive.current) {
+            emit({ type: 'call_end', phone: activePhone.current || phone });
           }
-          incomingInProgress.current = false;
-          outgoingInProgress.current = false;
-          activePhone.current = '';
-          setActiveCall(null);
+          reset();
+          break;
+        }
+
+        case 'Missed': {
+          if (callActive.current && !answered.current) {
+            // A primary incoming call that rang but was never answered.
+            emit({ type: 'call_end', phone: activePhone.current || phone });
+            reset();
+          }
+          // If a call is active AND answered, a "Missed" is a call-waiting caller
+          // who gave up while the operator stayed on the real call — ignore it
+          // so we don't end the ongoing call.
           break;
         }
 
