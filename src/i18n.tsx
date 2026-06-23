@@ -105,6 +105,24 @@ const uz: Dict = {
   'call.sentToPos': 'Raqam kassaga uzatildi',
   'call.now': 'hozir',
   'call.noNumber': '(raqam yo‘q)',
+
+  'update.title': 'Yangilanish mavjud',
+  'update.ota.desc': 'Ilova yangilanishi tayyor',
+  'update.apk.desc': 'Yangi versiya tayyor',
+  'update.button': 'Yangilash',
+  'update.downloading': 'Yuklab olinmoqda…',
+  'update.mandatory': 'Majburiy yangilanish',
+  'support.title': 'Yordam va ma‘lumot',
+  'support.updates': 'Yangilanishlar',
+  'support.version': 'Versiya',
+  'support.contact': 'Bog‘lanish',
+  'support.phone': 'Telefon',
+  'support.telegram': 'Telegram',
+  'support.email': 'Pochta',
+  'support.checkUpdate': 'Yangilanishni tekshirish',
+  'support.upToDate': 'Eng so‘nggi versiya o‘rnatilgan',
+  'support.checking': 'Tekshirilmoqda…',
+  'support.close': 'Yopish',
 };
 
 const ru: Dict = {
@@ -188,6 +206,24 @@ const ru: Dict = {
   'call.sentToPos': 'Номер передан на кассу',
   'call.now': 'сейчас',
   'call.noNumber': '(нет номера)',
+
+  'update.title': 'Доступно обновление',
+  'update.ota.desc': 'Обновление приложения готово',
+  'update.apk.desc': 'Готова новая версия',
+  'update.button': 'Обновить',
+  'update.downloading': 'Загрузка…',
+  'update.mandatory': 'Обязательное обновление',
+  'support.title': 'Поддержка и информация',
+  'support.updates': 'Обновления',
+  'support.version': 'Версия',
+  'support.contact': 'Контакты',
+  'support.phone': 'Телефон',
+  'support.telegram': 'Telegram',
+  'support.email': 'Почта',
+  'support.checkUpdate': 'Проверить обновление',
+  'support.upToDate': 'Установлена последняя версия',
+  'support.checking': 'Проверка…',
+  'support.close': 'Закрыть',
 };
 
 const en: Dict = {
@@ -271,6 +307,24 @@ const en: Dict = {
   'call.sentToPos': 'Number sent to the POS',
   'call.now': 'now',
   'call.noNumber': '(no number)',
+
+  'update.title': 'Update available',
+  'update.ota.desc': 'An app update is ready',
+  'update.apk.desc': 'A new version is ready',
+  'update.button': 'Update',
+  'update.downloading': 'Downloading…',
+  'update.mandatory': 'Required update',
+  'support.title': 'Support & info',
+  'support.updates': 'Updates',
+  'support.version': 'Version',
+  'support.contact': 'Contact',
+  'support.phone': 'Phone',
+  'support.telegram': 'Telegram',
+  'support.email': 'Email',
+  'support.checkUpdate': 'Check for updates',
+  'support.upToDate': 'You are on the latest version',
+  'support.checking': 'Checking…',
+  'support.close': 'Close',
 };
 
 const DICTS: Record<Lang, Dict> = { uz, ru, en };

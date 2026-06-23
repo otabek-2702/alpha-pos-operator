@@ -21,6 +21,8 @@ import {
   Warning,
 } from '../components/Icons';
 import { Button, Label, Screen } from '../components/ui';
+import { UpdateBanner } from '../components/UpdateBanner';
+import type { AppUpdates } from '../hooks/useAppUpdates';
 import type { ActiveCall, CallLogEntry } from '../hooks/useCallBridge';
 import type { WsStatus } from '../hooks/useWebSocket';
 import { LANG_SHORT, useT } from '../i18n';
@@ -33,9 +35,11 @@ export interface StatusScreenProps {
   permissionGranted: boolean | null;
   queuedCount: number;
   activeCall: ActiveCall | null;
+  updates: AppUpdates;
   onRepair: () => void;
   onSendTest: () => void;
   onFixPermission: () => void;
+  onOpenSupport: () => void;
 }
 
 function pad(n: number) {
@@ -67,7 +71,9 @@ export function StatusScreen(props: StatusScreenProps) {
 
   return (
     <Screen>
-      <Header lang={lang} onCycleLang={cycleLang} />
+      <Header lang={lang} onCycleLang={cycleLang} onOpenSupport={props.onOpenSupport} />
+
+      <UpdateBanner updates={props.updates} />
 
       <View style={{ paddingHorizontal: space.lg }}>
         {revoked ? <RevokedBanner /> : null}
@@ -100,7 +106,15 @@ export function StatusScreen(props: StatusScreenProps) {
 
 /* ---------- Header ---------- */
 
-function Header({ lang, onCycleLang }: { lang: 'uz' | 'ru' | 'en'; onCycleLang: () => void }) {
+function Header({
+  lang,
+  onCycleLang,
+  onOpenSupport,
+}: {
+  lang: 'uz' | 'ru' | 'en';
+  onCycleLang: () => void;
+  onOpenSupport: () => void;
+}) {
   return (
     <View
       style={{
@@ -144,7 +158,9 @@ function Header({ lang, onCycleLang }: { lang: 'uz' | 'ru' | 'en'; onCycleLang: 
             {LANG_SHORT[lang]}
           </Text>
         </TouchableOpacity>
-        <DotsVertical size={22} />
+        <TouchableOpacity onPress={onOpenSupport} activeOpacity={0.7} hitSlop={10}>
+          <DotsVertical size={22} />
+        </TouchableOpacity>
       </View>
     </View>
   );

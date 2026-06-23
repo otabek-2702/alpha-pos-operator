@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { AppState, StatusBar } from 'react-native';
+import { AppState, StatusBar, StyleSheet, View } from 'react-native';
 import {
   HankenGrotesk_400Regular,
   HankenGrotesk_500Medium,
@@ -14,6 +14,7 @@ import {
   useFonts,
 } from '@expo-google-fonts/jetbrains-mono';
 
+import { useAppUpdates } from './src/hooks/useAppUpdates';
 import { useCallBridge } from './src/hooks/useCallBridge';
 import { useWebSocket } from './src/hooks/useWebSocket';
 import { I18nProvider } from './src/i18n';
@@ -21,6 +22,7 @@ import { PairScreen } from './src/screens/PairScreen';
 import { PermissionsScreen } from './src/screens/PermissionsScreen';
 import { SplashScreen } from './src/screens/SplashScreen';
 import { StatusScreen } from './src/screens/StatusScreen';
+import { SupportScreen } from './src/screens/SupportScreen';
 import {
   checkPermissions,
   hasRequiredPermissions,
@@ -53,6 +55,9 @@ function Root() {
   const [perms, setPerms] = useState<PermissionState | null>(null);
   const [gateDone, setGateDone] = useState(false);
   const [ready, setReady] = useState(false);
+  const [showSupport, setShowSupport] = useState(false);
+
+  const updates = useAppUpdates();
 
   useEffect(() => {
     (async () => {
@@ -119,9 +124,11 @@ function Root() {
         permissionGranted={callEnabled}
         queuedCount={queuedCount}
         activeCall={activeCall}
+        updates={updates}
         onRepair={handleRepair}
         onSendTest={handleSendTest}
         onFixPermission={openAppSettings}
+        onOpenSupport={() => setShowSupport(true)}
       />
     );
   } else {
@@ -132,6 +139,11 @@ function Root() {
     <>
       <StatusBar barStyle="light-content" backgroundColor="transparent" translucent />
       {content}
+      {showSupport ? (
+        <View style={StyleSheet.absoluteFill}>
+          <SupportScreen updates={updates} onClose={() => setShowSupport(false)} />
+        </View>
+      ) : null}
     </>
   );
 }
