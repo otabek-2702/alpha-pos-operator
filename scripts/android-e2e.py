@@ -131,6 +131,13 @@ def service_alive():
     return "CallBridgeForegroundService" in text and "isForeground=true" in text
 
 
+def boot_id():
+    try:
+        return adb("shell", "cat", "/proc/sys/kernel/random/boot_id", timeout=12, check=False).strip()
+    except subprocess.TimeoutExpired:
+        return ""
+
+
 def app_recent_tasks():
     text = adb("shell", "dumpsys", "activity", "recents")
     # Task affinity is commonly A=10205:com.example.app, not A=com.example.app.
@@ -285,13 +292,21 @@ try:
     stage(f"PASS: task removed through {removal_method}; foreground service and real call delivery continue")
 
     offset = len(events())
+    previous_boot_id = boot_id()
+    assert re.fullmatch(r"[0-9a-f-]{36}", previous_boot_id), "Could not identify the running Android boot"
     adb("reboot")
     adb("wait-for-device", timeout=160)
+    # adb can briefly reconnect to the old daemon while reboot is being scheduled.
+    wait_for(lambda: (current := boot_id()) != previous_boot_id and bool(re.fullmatch(r"[0-9a-f-]{36}", current)), "a new Android kernel boot", 180)
     wait_for(lambda: adb("shell", "getprop", "sys.boot_completed", timeout=15).strip() == "1", "normal reboot", 180)
     adb("shell", "input", "keyevent", "KEYCODE_WAKEUP")
     adb("shell", "input", "keyevent", "82")
+    wait_for(lambda: "RUNNING_UNLOCKED" in adb("shell", "am", "get-started-user-state", "0", timeout=15), "first user unlock after reboot", 90)
     wait_for(lambda: both_since(offset, lambda e: e.get("event") == "connected"), "automatic two-POS reconnect after reboot and unlock", 90)
-    assert service_alive(), "Service did not restart after reboot"
+    wait_for(service_alive, "foreground service restored after reboot and first unlock", 90)
+    (OUT / "reboot-evidence.json").write_text(json.dumps({"previousBootId": previous_boot_id, "currentBootId": boot_id(), "userState": adb("shell", "am", "get-started-user-state", "0").strip()}, indent=2), encoding="utf-8")
+    # Proves these are live post-reboot peers, not late events from the old sockets.
+    call("998900001236", answer=False)
     launch()
     wait_for(lambda: find("Ishlayapti"), "working UI after reboot")
     snapshot("04-after-reboot")
@@ -356,9 +371,18 @@ try:
     assert "OperatorTest" in state["recordings"].get("folderName", ""), "Folder name was not saved"
     assert not state["recordings"].get("enabled"), "This synthetic test must keep Telegram audio disabled"
     assert len(state.get("periods", [])) >= 2, "Restart uptime periods not recorded"
-    assert state["history"]["callCount"] >= 2, "Completed calls did not persist"
+    assert state["history"]["callCount"] >= 3, "Completed calls did not persist"
     stage("PASS: durable calls, saved target deletion and service uptime periods")
 except BaseException:
+    for name, command in [
+        ("failure-activity-services.txt", ("shell", "dumpsys", "activity", "services", APP)),
+        ("failure-user-state.txt", ("shell", "am", "get-started-user-state", "0")),
+        ("failure-boot-id.txt", ("shell", "cat", "/proc/sys/kernel/random/boot_id")),
+    ]:
+        try:
+            (OUT / name).write_text(adb(*command, check=False), encoding="utf-8")
+        except BaseException:
+            pass
     try:
         (OUT / "failure-package-permissions.txt").write_text(adb("shell", "dumpsys", "package", APP), encoding="utf-8")
     except BaseException:
