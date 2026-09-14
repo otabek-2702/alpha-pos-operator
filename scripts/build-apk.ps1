@@ -31,11 +31,19 @@ try {
     $env:CMAKE_BUILD_PARALLEL_LEVEL = '1'
 
     # Keep generated native config current while retaining incremental build caches.
+    # Windows PowerShell treats redirected native stderr as ErrorRecord objects.
+    # Compiler warnings must not stop a successful build; use the process exit code.
+    $ErrorActionPreference = 'Continue'
     & .\node_modules\.bin\expo.cmd prebuild --platform android --no-install
-    if ($LASTEXITCODE -ne 0) { throw "Expo prebuild failed (exit $LASTEXITCODE)." }
+    $prebuildExitCode = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    if ($prebuildExitCode -ne 0) { throw "Expo prebuild failed (exit $prebuildExitCode)." }
 
+    $ErrorActionPreference = 'Continue'
     & .\android\gradlew.bat -p android :app:assembleRelease -I (Join-Path $PSScriptRoot 'native-jobs.init.gradle') --build-cache --console=plain --max-workers=1 --no-daemon '-Dorg.gradle.jvmargs=-Xmx1536m -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8' '-Pkotlin.compiler.execution.strategy=in-process' "-PreactNativeArchitectures=$Architectures"
-    if ($LASTEXITCODE -ne 0) { throw "Android build failed (exit $LASTEXITCODE)." }
+    $buildExitCode = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    if ($buildExitCode -ne 0) { throw "Android build failed (exit $buildExitCode)." }
 
     # AAR dependencies contain every ABI even when CMake built only one. Verify
     # packaging filters and the app's required native engines before delivery.
