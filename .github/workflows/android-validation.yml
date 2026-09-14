@@ -35,6 +35,17 @@ jobs:
       run:
         shell: bash
     steps:
+      - name: Fetch the exact source for the emulator UI driver
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}.git
+        run: |
+          git init source
+          git -C source remote add origin "$SOURCE_URL"
+          git -C source fetch --depth 1 origin "$SOURCE_SHA"
+          git -C source checkout --detach FETCH_HEAD
+          npm ci --prefix source --ignore-scripts --no-audit --no-fund
+
       - name: Download and verify the two draft candidate APKs
         env:
           GH_TOKEN: ${{ github.token }}
@@ -83,6 +94,7 @@ jobs:
           if grep -Eq 'FAIL:|INSTRUMENTATION_FAILED|INSTRUMENTATION_ABORTED' ci/instrumentation-normalized.txt; then
             exit 1
           fi
+          python3 source/scripts/android-e2e.py
           SCRIPT
           bash -n ci/run-instrumentation.sh
 
@@ -110,7 +122,7 @@ jobs:
       - name: Report instrumentation results
         if: always()
         run: |
-          for file in ci/instrumentation.txt ci/android-crashes.txt; do
+          for file in ci/instrumentation.txt ci/android-crashes.txt ci/e2e/results.txt; do
             if [[ -s "$file" ]]; then
               printf '\n%s\n\n```text\n' "$file" >> "$GITHUB_STEP_SUMMARY"
               head -c 24000 "$file" >> "$GITHUB_STEP_SUMMARY"
@@ -118,4 +130,12 @@ jobs:
               cat "$file"
             fi
           done
-          # No APK, test data, AVD cache, or log artifact is retained by this job.
+      - name: Save synthetic UI and service evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: operator-emulator-evidence
+          path: ci/e2e/
+          retention-days: 7
+          if-no-files-found: ignore
+          # Only synthetic call/POS data: no Telegram configuration, APKs or AVD cache.

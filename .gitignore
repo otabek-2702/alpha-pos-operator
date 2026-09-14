@@ -18,6 +18,7 @@ npm-debug.*
 # macOS / editor
 .DS_Store
 *.tsbuildinfo
+__pycache__/
 
 # Local env / secrets
 .env

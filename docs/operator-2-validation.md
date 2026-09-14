@@ -10,17 +10,23 @@ finishes; a compiled APK is not proof of Samsung-specific call recording access.
   WSS/IPv6, keeping bot secrets out of persisted JS view models, and private
   Telegram QR provisioning with separate groups).
 - Native recording policy: 17 JVM checks passed against production Kotlin code.
-- APK signing: the new build and the previous local 1.0.0 APK use the same
-  certificate. The previous APK is retained as `dist/operator-1.0.0.apk`.
-- Android instrumentation: pending the emulator run. Tests cover real SQLite
+- APK signing: the local 2.0 test build and the previous local 1.0.0 APK use the
+  same certificate. The previous APK is retained as `dist/operator-1.0.0.apk`.
+  The final ARM release artifact still needs its own package/signing audit.
+- Telegram setup API: separate report messages and a synthetic silent WAV
+  document upload were confirmed. These checks verify bot/group access;
+  they do not validate the Android app's recording pipeline.
+- Android instrumentation and emulator UI/service checks: pending independent
+  CI execution. Planned checks cover real SQLite
   baseline/outbox persistence, Keystore encryption, uptime intervals, answer
   timing, call duration, missed/waiting calls, callback attempts vs connections,
   customer names, independent POS ACKs and restart recovery.
-  The local API 35 emulator initially failed during Android system startup,
-  before app installation, under host memory pressure. Its isolated test
-  environment uses the emulator's low-RAM option and a 300-second system
-  watchdog timeout; application ANR checks are unchanged. This is a test-host
-  workaround, not a change shipped in the APK.
+  The local API 35 emulator failed or stalled during Android startup and app
+  installation under host memory pressure. A low-RAM configuration did not
+  make it suitable for the required checks, so an independent CI emulator is
+  being used. A requested watchdog setting was stored, but logs still showed
+  a 60-second timeout; no effective 300-second timeout is claimed. These host
+  attempts are not successful app tests or changes shipped in the APK.
 - Desktop: full lint/typecheck passed; 207 tests passed, four existing SQLite
   cases skipped by the desktop test environment. Real WebSocket and UDP tests
   cover permanent pairing, saved mode, discovery, durable call records and ACKs.
@@ -31,6 +37,8 @@ finishes; a compiled APK is not proof of Samsung-specific call recording access.
   release manifest.
 
 ## Physical Samsung check
+
+Follow the [Uzbek installation guide](operator-2-install-uz.md) before testing.
 
 After installing, verify an answered incoming call, an unanswered incoming
 call, an outgoing callback that connects, and a callback that is not answered.
@@ -63,6 +71,12 @@ Operator setting and its pairing identity should survive logout and restart.
   Completed call records instead use durable revision ACKs.
 - New audio waits for a stable file and no active call. Files larger than
   Telegram's 50 MB Bot API upload limit remain visibly failed.
+- Audio setup excludes files already in the selected folder. Saving a folder,
+  recording-group or bot-identity change, or saving audio off and then on,
+  creates a new baseline and excludes the files present at that point, including
+  previously pending files. Keep uploads enabled during temporary network loss
+  so the existing pending queue can retry. Re-saving unchanged enabled settings
+  keeps the baseline.
 - Telegram has no idempotency key for sendDocument/sendMessage; a successful
   request with a lost response can rarely duplicate on retry.
 - Service uptime reflects the Android service, not POS/network availability.
