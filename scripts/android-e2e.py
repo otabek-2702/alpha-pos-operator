@@ -134,8 +134,17 @@ def service_alive():
 def app_recent_tasks():
     text = adb("shell", "dumpsys", "activity", "recents")
     # Task affinity is commonly A=10205:com.example.app, not A=com.example.app.
-    blocks = re.findall(r"(?ms)^\s*\*?\s*Recent #\d+:.*?(?=^\s*\*?\s*Recent #\d+:|\Z)", text)
-    return text, [block for block in blocks if APP in block]
+    blocks = re.findall(r"(?ms)^\s*\*?\s*Recent #\d+:.*?(?=^\s*\*?\s*Recent #\d+:|^\s*Visible recent tasks|\Z)", text)
+    component = r"(?m)^\s*mActivityComponent=" + re.escape(APP) + r"/\S+\s*$"
+    return text, [block for block in blocks if re.search(component, block)]
+
+
+def own_app_root_task_id(block):
+    component = re.search(r"(?m)^\s*mActivityComponent=(\S+)\s*$", block)
+    task = re.search(r"(?m)^\s*taskId=(\d+)\s+rootTaskId=(\d+)\s*$", block)
+    assert component and component[1].split("/", 1)[0] == APP, "Refusing to remove another app's task"
+    assert task and task[1] == task[2] and int(task[1]) > 0, "Expected an isolated app root task"
+    return int(task[1])
 
 
 def gsm(action, number):
@@ -224,6 +233,8 @@ try:
     adb("shell", "input", "keyevent", "KEYCODE_APP_SWITCH")
     time.sleep(2)
     snapshot("03-recents-before-swipe")
+    removal_method = "overview_swipe"
+    removed_task_ids = []
     for attempt in range(1, 4):
         # Pixel's first-use overview tooltip can consume the first gesture.
         # Retry only while Android still reports the actual application task.
@@ -234,12 +245,24 @@ try:
         snapshot(f"03-recents-after-swipe-{attempt}")
         if not remaining_tasks:
             break
+    if remaining_tasks:
+        # Android 13/15 ActivityManagerShellCommand.runRootTaskRemove delegates
+        # to removeTask(taskId), which exercises onTaskRemoved, not force-stop.
+        removal_method = "am_stack_remove"
+        removed_task_ids = [own_app_root_task_id(block) for block in remaining_tasks]
+        stage(f"INFO: overview gestures left the task present; removing verified app task IDs {removed_task_ids} through Android ActivityManager")
+        for task_id in removed_task_ids:
+            adb("shell", "am", "stack", "remove", task_id)
+        wait_for(lambda: not app_recent_tasks()[1], "verified app task removed by ActivityManager", 20)
+        recents, remaining_tasks = app_recent_tasks()
+        snapshot("03-recents-after-shell-removal")
     (OUT / "recents-after-swipe.txt").write_text(recents, encoding="utf-8")
-    assert not remaining_tasks, "App task was not swiped away"
+    assert not remaining_tasks, "App task remains in Android's recent task list"
+    (OUT / "task-removal-method.json").write_text(json.dumps({"method": removal_method, "taskIds": removed_task_ids, "confirmedAbsent": True}, indent=2), encoding="utf-8")
     adb("shell", "input", "keyevent", "KEYCODE_HOME")
     assert service_alive(), "Foreground service stopped when app task was removed"
     call("998900001235", answer=False)
-    stage("PASS: task removed from recents; foreground service and real call delivery continue")
+    stage(f"PASS: task removed through {removal_method}; foreground service and real call delivery continue")
 
     offset = len(events())
     adb("reboot")
