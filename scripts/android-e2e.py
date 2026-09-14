@@ -152,10 +152,14 @@ def gsm(action, number):
     assert "OK" in output and "KO:" not in output, f"Emulator rejected gsm {action}: {output}"
 
 
-def runtime_permissions_granted():
+def runtime_permission_state():
     package = adb("shell", "dumpsys", "package", APP)
-    return all(re.search(r"android\.permission\." + name + r": granted=true\b", package)
-               for name in ["READ_PHONE_STATE", "READ_CALL_LOG", "CAMERA", "POST_NOTIFICATIONS"])
+    return {name: bool(re.search(r"android\.permission\." + name + r": granted=true\b", package))
+            for name in ["READ_PHONE_STATE", "READ_CALL_LOG", "CAMERA", "POST_NOTIFICATIONS"]}
+
+
+def runtime_permissions_granted():
+    return all(runtime_permission_state().values())
 
 
 def call(number, answer=True):
@@ -199,20 +203,36 @@ try:
     wait_for(lambda: find("Asosiy ruxsatlarni berish"), "Uzbek permissions onboarding")
     snapshot("01-permissions")
     tap("Asosiy ruxsatlarni berish")
+    permission_requests = 1
+    permission_dialogs = 0
+    retry_permissions_at = time.monotonic() + 10
     deadline = time.monotonic() + 70
     while time.monotonic() < deadline:
         tree = ui()
         allowed = False
         for label in ["permission_allow_foreground_only_button", "permission_allow_button"]:
-            if find(label, tree):
-                tap(label)
+            bounds = find(label, tree)
+            if bounds:
+                permission_dialogs += 1
+                ET.ElementTree(tree).write(OUT / f"permission-dialog-{permission_dialogs}.xml", encoding="utf-8")
+                (OUT / f"permission-dialog-{permission_dialogs}.png").write_bytes(adb("exec-out", "screencap", "-p", binary=True))
+                stage(f"INFO: permission dialog {permission_dialogs}, request {permission_requests}, pressing {label}; grants={json.dumps(runtime_permission_state())}")
+                adb("shell", "input", "tap", (bounds[0] + bounds[2]) // 2, (bounds[1] + bounds[3]) // 2)
+                time.sleep(1)
+                retry_permissions_at = time.monotonic() + 10
                 allowed = True
                 break
         if not allowed and runtime_permissions_granted() and find("Tayyor", tree):
             break
+        if not allowed and permission_requests < 3 and time.monotonic() >= retry_permissions_at and find("Asosiy ruxsatlarni berish", tree):
+            stage(f"INFO: no permission dialog remains; retrying app grant button, request {permission_requests + 1}; grants={json.dumps(runtime_permission_state())}")
+            tap("Asosiy ruxsatlarni berish")
+            permission_requests += 1
+            retry_permissions_at = time.monotonic() + 10
         time.sleep(1)
     assert runtime_permissions_granted(), "Onboarding did not grant all four requested runtime permissions"
     assert find("Tayyor"), "The onboarding completion button is still disabled"
+    stage(f"INFO: all four Android runtime permissions confirmed after {permission_requests} app grant requests")
     tap("Tayyor")
     wait_for(lambda: both_since(0, lambda e: e.get("event") == "connected"), "two POS connections")
     wait_for(lambda: find("Ishlayapti"), "actual working status")
