@@ -176,9 +176,9 @@ function Root() {
     if (!configLoadedRef.current || loadingConfigRef.current) return Promise.reject(new Error(CONFIG_LOAD_ERROR));
     const operation = mutation.current.catch(() => {}).then(async () => {
       if (!configLoadedRef.current || loadingConfigRef.current) throw new Error(CONFIG_LOAD_ERROR);
-      await configureOperator(change(configRef.current));
       let saved: OperatorConfiguration;
       try {
+        await configureOperator(change(configRef.current));
         saved = await getOperatorConfiguration();
       } catch (error) {
         // The write may have succeeded; block later writes based on a stale view.
