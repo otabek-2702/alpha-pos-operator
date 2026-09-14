@@ -83,6 +83,13 @@ def wait_for(check, description, seconds=60):
     raise AssertionError(f"Timed out: {description}")
 
 
+def dismiss_test_alert():
+    # React Native's default Alert is not cancelable with Android's Back button.
+    wait_for(lambda: find("Sinov yuborildi"), "Send test confirmation dialog", 15)
+    tap("OK")
+    wait_for(lambda: not find("Sinov yuborildi"), "Send test confirmation dismissed", 15)
+
+
 def scenario(mode):
     output = adb("shell", "am", "instrument", "-w", "-r", "-e", "mode", mode,
                  f"{APP}.test/{APP}.OperatorRuntimeInstrumentation", timeout=100)
@@ -196,7 +203,7 @@ try:
     offset = len(events())
     tap("Sinov yuborish")
     wait_for(lambda: both_since(offset, lambda e: e.get("type") == "call_start" and e.get("test")), "Send test reached both POS")
-    adb("shell", "input", "keyevent", "KEYCODE_BACK")
+    dismiss_test_alert()
     time.sleep(3)
     stage("PASS: Uzbek onboarding, actual working status, two saved POS and Send test")
 
@@ -209,12 +216,19 @@ try:
     adb("shell", "input", "keyevent", "KEYCODE_APP_SWITCH")
     time.sleep(2)
     snapshot("03-recents-before-swipe")
-    adb("shell", "input", "swipe", 360, 730, 360, 70, 400)
-    time.sleep(3)
-    adb("shell", "input", "keyevent", "KEYCODE_HOME")
-    recents, remaining_tasks = app_recent_tasks()
+    for attempt in range(1, 4):
+        # Pixel's first-use overview tooltip can consume the first gesture.
+        # Retry only while Android still reports the actual application task.
+        adb("shell", "input", "swipe", 360, 730, 360, 70, 400)
+        time.sleep(3)
+        recents, remaining_tasks = app_recent_tasks()
+        (OUT / f"recents-after-swipe-{attempt}.txt").write_text(recents, encoding="utf-8")
+        snapshot(f"03-recents-after-swipe-{attempt}")
+        if not remaining_tasks:
+            break
     (OUT / "recents-after-swipe.txt").write_text(recents, encoding="utf-8")
     assert not remaining_tasks, "App task was not swiped away"
+    adb("shell", "input", "keyevent", "KEYCODE_HOME")
     assert service_alive(), "Foreground service stopped when app task was removed"
     call("998900001235", answer=False)
     stage("PASS: task removed from recents; foreground service and real call delivery continue")
@@ -279,7 +293,7 @@ try:
     time.sleep(4)
     ports = {e["port"] for e in events()[offset:] if e.get("type") == "call_start" and e.get("test")}
     assert ports == {8765}, f"Test after removal reached unexpected targets: {ports}"
-    adb("shell", "input", "keyevent", "KEYCODE_BACK")
+    dismiss_test_alert()
     snapshot("06-one-pos-home")
     stage("PASS: Android folder chooser and save; deleted POS receives no later tests")
 
