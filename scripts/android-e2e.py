@@ -35,12 +35,17 @@ def ui():
         try:
             # A failed dump must never reuse an XML file from the previous screen.
             adb("shell", "rm", "-f", "/sdcard/operator-ui.xml")
-            adb("shell", "uiautomator", "dump", "/sdcard/operator-ui.xml", timeout=25)
+            # Android 13's legacy dumper can dereference a missing child in
+            # Files' decorative accessibility nodes. Its standard compressed
+            # hierarchy excludes unimportant views without changing the app.
+            options = ("--compressed",) if attempt else ()
+            adb("shell", "uiautomator", "dump", *options, "/sdcard/operator-ui.xml", timeout=25)
             raw = adb("exec-out", "cat", "/sdcard/operator-ui.xml")
             return ET.fromstring(raw[raw.index("<?xml"):])
-        except (ValueError, ET.ParseError, subprocess.TimeoutExpired, RuntimeError):
+        except (ValueError, ET.ParseError, subprocess.TimeoutExpired, RuntimeError) as error:
             if attempt == 2:
                 raise
+            stage(f"INFO: UI dump attempt {attempt + 1} failed ({type(error).__name__}); retrying a fresh compressed hierarchy")
             time.sleep(2)
 
 
