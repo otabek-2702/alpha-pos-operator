@@ -1,693 +1,153 @@
-import { useEffect, useState } from 'react';
-import { ScrollView, Text, TouchableOpacity, View } from 'react-native';
+import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
-import * as Clipboard from 'expo-clipboard';
 
-import { Blink, ExpandingRing, Pulse, Spin } from '../components/anim';
-import {
-  ArrowIncoming,
-  ArrowOutgoing,
-  CallEnded,
-  CheckRing,
-  Clock,
-  Copy,
-  Database,
-  DotsVertical,
-  Globe,
-  PhoneFill,
-  PhoneOff,
-  Send,
-  SpinnerArc,
-  Warning,
-} from '../components/Icons';
+import { Clock, DotsVertical, PhoneFill, Rescan, Send, Settings } from '../components/Icons';
 import { Button, Label, Screen } from '../components/ui';
 import { UpdateBanner } from '../components/UpdateBanner';
 import type { AppUpdates } from '../hooks/useAppUpdates';
-import type { ActiveCall, CallLogEntry } from '../hooks/useCallBridge';
-import type { WsStatus } from '../hooks/useWebSocket';
-import { LANG_SHORT, useT } from '../i18n';
+import type { RuntimeSnapshot, SavedPos } from '../operator';
 import { colors, fonts, radius, space, tint } from '../theme';
 
 export interface StatusScreenProps {
-  url: string;
-  status: WsStatus;
-  log: CallLogEntry[];
-  permissionGranted: boolean | null;
-  queuedCount: number;
-  activeCall: ActiveCall | null;
+  snapshot: RuntimeSnapshot | null;
+  targets: SavedPos[];
+  permissionGranted: boolean;
   updates: AppUpdates;
-  onRepair: () => void;
+  onAdd: () => void;
+  onRemove: (id: string) => void;
   onSendTest: () => void;
-  onFixPermission: () => void;
+  onOpenPermissions: () => void;
+  onOpenTelegram: () => void;
+  onOpenHistory: () => void;
   onOpenSupport: () => void;
-}
-
-function pad(n: number) {
-  return n.toString().padStart(2, '0');
-}
-function formatTime(at: number) {
-  const d = new Date(at);
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-/** Live ticking elapsed seconds since `startedAt` (or null). */
-function useElapsed(startedAt: number | null): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (startedAt == null) return;
-    setNow(Date.now());
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, [startedAt]);
-  if (startedAt == null) return 0;
-  return Math.max(0, Math.floor((now - startedAt) / 1000));
+  testing?: boolean;
 }
 
 export function StatusScreen(props: StatusScreenProps) {
-  const { t, lang, cycleLang } = useT();
-  const { url, status, log, permissionGranted, queuedCount, activeCall } = props;
-  const connected = status === 'connected';
-  const revoked = permissionGranted === false;
+  const { snapshot, targets, permissionGranted } = props;
+  const telegram = snapshot?.telegram;
+  const needsSetup = targets.length === 0 && !telegram?.enabled && !telegram?.sendCallStats;
+  const connected = targets.filter((target) => snapshot?.targets.some((item) => item.id === target.id && item.status === 'connected')).length;
+  const monitoringFailed = !!snapshot?.running && snapshot.phonePermission === false && permissionGranted;
+  const running = !!snapshot?.running && permissionGranted && !monitoringFailed;
+  const allConnected = running && targets.length > 0 && connected === targets.length;
+  const status = !permissionGranted ? 'Ruxsat kerak' : !snapshot ? 'Tekshirilmoqda' : monitoringFailed ? 'Kuzatuv ishlamayapti' : needsSetup ? 'POS qo‘shing' : !running ? 'Ishlamayapti' : targets.length === 0 ? 'Ishlayapti' : connected === 0 ? 'Ulanish kutilmoqda' : !allConnected ? 'Qisman ulangan' : 'Ishlayapti';
+  const tone = allConnected || (running && targets.length === 0 && !needsSetup) ? colors.connected : needsSetup ? colors.brand : !permissionGranted || (snapshot && !running) ? colors.danger : colors.warn;
+  const statusDescription = !permissionGranted
+    ? 'Qo‘ng‘iroqlarni yuborish uchun telefon va qo‘ng‘iroqlar tarixiga ruxsat bering.'
+    : !snapshot ? 'Telefon xizmati holati olinmoqda…'
+    : monitoringFailed ? 'Telefon qo‘ng‘iroqlarini kuzatish boshlanmadi. Ruxsatlarni tekshirib, ilovani qayta oching.'
+    : needsSetup ? 'POS dagi Operator tugmasini bosib turing va QR-kodni bir marta skanerlang.'
+    : !running ? 'Telefon xizmati to‘xtagan. Ruxsatlar va batareya sozlamalarini tekshiring.'
+    : targets.length === 0 ? 'Telegramga yuborish xizmati ishlayapti. Qo‘ng‘iroqlarni POSga yuborish uchun POS qo‘shing.'
+    : `${connected} / ${targets.length} POS ulangan. Har bir qo‘ng‘iroq barcha saqlangan POS larga yuboriladi.`;
+  const telegramDescription = telegram?.lastError || telegram?.statsError ? 'Yuborishda muammo · sozlamalarni tekshiring' : telegram?.enabled && telegram.configured ? `${telegram.sent} ta yozuv yuborildi · ${telegram.pending} ta navbatda` : telegram?.sendCallStats ? 'Qo‘ng‘iroqlar hisoboti yoqilgan' : !telegram?.configured ? 'Bot, guruhlar va yozuvlar papkasini sozlang' : 'Yuborish o‘chirilgan';
 
   return (
     <Screen>
-      <Header lang={lang} onCycleLang={cycleLang} onOpenSupport={props.onOpenSupport} />
-
-      <UpdateBanner updates={props.updates} />
-
-      <View style={{ paddingHorizontal: space.lg }}>
-        {revoked ? <RevokedBanner /> : null}
-
-        {activeCall ? (
-          <ActiveCallBanner call={activeCall} connected={connected} />
-        ) : revoked ? (
-          <CompactConnected url={url} status={status} />
-        ) : (
-          <ConnectionCard url={url} status={status} queuedCount={queuedCount} />
-        )}
-
-        {revoked ? (
-          <DetectionRow stopped onFix={props.onFixPermission} />
-        ) : (
-          <DetectionRow stopped={false} />
-        )}
+      <View style={styles.header}>
+        <View style={styles.brand}>
+          <LinearGradient colors={[colors.brand, colors.brandDark]} style={styles.appIcon}><PhoneFill size={18} /></LinearGradient>
+          <View>
+            <Text style={styles.brandTitle}>Smart POS Operator</Text>
+            <Text style={styles.brandSubtitle}>Telefon va POS birga ishlaydi</Text>
+          </View>
+        </View>
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel="Yordam va yangilanishlar" onPress={props.onOpenSupport} style={styles.menu}><DotsVertical size={24} /></TouchableOpacity>
       </View>
 
-      <EventList log={log} status={status} queuedCount={queuedCount} />
+      <ScrollView contentContainerStyle={styles.content}>
+        <UpdateBanner updates={props.updates} />
+        <LinearGradient colors={[allConnected ? tint.connectedBg : colors.raised, colors.inset]} style={[styles.statusCard, { borderColor: tone }]}>
+          <View style={styles.statusLabel}><View style={[styles.dot, { backgroundColor: tone }]} /><Label color={tone}>Xizmat holati</Label></View>
+          <Text accessibilityRole="header" accessibilityLiveRegion="polite" style={[styles.statusTitle, { color: tone }]}>{status}</Text>
+          <Text style={styles.description}>{statusDescription}</Text>
+          {snapshot?.lastError ? <Text style={[styles.description, { color: colors.warn, marginTop: 8 }]}>{snapshot.lastError}</Text> : null}
+          {running ? <Text style={styles.backgroundNote}>Ilova yopilganda ham xizmat fonda ishlaydi.</Text> : null}
+        </LinearGradient>
 
-      <Footer
-        connected={connected}
-        onSendTest={props.onSendTest}
-        onRepair={props.onRepair}
-      />
+        <View style={styles.sectionHeading}><Text style={styles.sectionTitle}>Saqlangan POS lar</Text><Text style={styles.count}>{targets.length}</Text></View>
+        {targets.length === 0 ? (
+          <View style={styles.empty}>
+            <Rescan size={28} color={colors.brand} />
+            <Text style={styles.emptyTitle}>Birinchi POS ni qo‘shing</Text>
+            <Text style={[styles.description, { textAlign: 'center' }]}>Telefon va POS bir xil Wi-Fi yoki mahalliy tarmoqqa ulangan bo‘lsin. Keyingi safar ulanish avtomatik tiklanadi.</Text>
+          </View>
+        ) : targets.map((target) => {
+          const runtime = snapshot?.targets.find((item) => item.id === target.id);
+          const state = running ? runtime?.status ?? 'disconnected' : 'disconnected';
+          const color = state === 'connected' ? colors.connected : state === 'connecting' ? colors.warn : colors.muted;
+          const label = state === 'connected' ? 'Ulangan' : state === 'connecting' ? 'Ulanmoqda…' : 'Ulanmagan';
+          return (
+            <View key={target.id} style={styles.posCard}>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text numberOfLines={2} style={styles.posName}>{target.name}</Text>
+                <View style={styles.posState}><View style={[styles.smallDot, { backgroundColor: color }]} /><Text style={[styles.posStateText, { color }]}>{label}</Text></View>
+                <Text numberOfLines={1} style={styles.address}>{(runtime?.url ?? target.url).split('?')[0]}</Text>
+                {runtime?.error ? <Text style={[styles.description, { color: colors.muted, marginTop: 4 }]}>{runtime.error}</Text> : null}
+              </View>
+              <TouchableOpacity accessibilityRole="button" accessibilityLabel={`${target.name} POS ni o‘chirish`} onPress={() => props.onRemove(target.id)} style={styles.removeButton}><Text style={styles.removeText}>O‘chirish</Text></TouchableOpacity>
+            </View>
+          );
+        })}
+
+        <Text style={[styles.sectionTitle, { marginTop: 12 }]}>Sozlamalar</Text>
+        <View style={styles.settings}>
+          <SettingsRow icon={<Settings size={20} color={permissionGranted ? colors.connected : colors.warn} />} title="Ruxsatlar va batareya" description={permissionGranted ? 'Fonda ishlash va fayllarga kirishni tekshirish' : 'Qo‘ng‘iroqlar uchun ruxsatlar kerak'} onPress={props.onOpenPermissions} />
+          <View style={styles.divider} />
+          <SettingsRow icon={<Send size={20} color={colors.brand} />} title="Telegram yozuvlari va hisobot" description={telegramDescription} onPress={props.onOpenTelegram} />
+          <View style={styles.divider} />
+          <SettingsRow icon={<Clock size={20} color={colors.brand} />} title="Ishlash tarixi" description="Xizmat yoqilgan va to‘xtagan vaqtlar" onPress={props.onOpenHistory} />
+        </View>
+      </ScrollView>
+
+      <View style={styles.footer}>
+        <Button label="POS qo‘shish" icon={<Rescan color={colors.onBrand} />} onPress={props.onAdd} style={{ flex: 1 }} />
+        <Button label="Sinov yuborish" variant="secondary" onPress={props.onSendTest} disabled={!running || targets.length === 0 || props.testing} loading={props.testing} style={{ flex: 1 }} />
+      </View>
     </Screen>
   );
 }
 
-/* ---------- Header ---------- */
-
-function Header({
-  lang,
-  onCycleLang,
-  onOpenSupport,
-}: {
-  lang: 'uz' | 'ru' | 'en';
-  onCycleLang: () => void;
-  onOpenSupport: () => void;
-}) {
+function SettingsRow({ icon, title, description, onPress }: { icon: React.ReactNode; title: string; description: string; onPress: () => void }) {
   return (
-    <View
-      style={{
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        paddingHorizontal: space.lg,
-        paddingTop: 6,
-        paddingBottom: 10,
-      }}
-    >
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 9 }}>
-        <LinearGradient
-          colors={[colors.brand, colors.brandDark]}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={{ width: 28, height: 28, borderRadius: 8, alignItems: 'center', justifyContent: 'center' }}
-        >
-          <PhoneFill size={15} />
-        </LinearGradient>
-        <Text style={{ color: colors.text, fontFamily: fonts.bold, fontSize: 15 }}>Operator Link</Text>
-      </View>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-        <TouchableOpacity
-          onPress={onCycleLang}
-          activeOpacity={0.8}
-          style={{
-            flexDirection: 'row',
-            alignItems: 'center',
-            gap: 4,
-            height: 26,
-            paddingHorizontal: 9,
-            borderRadius: radius.pill,
-            backgroundColor: colors.raised,
-            borderWidth: 1,
-            borderColor: colors.border,
-          }}
-        >
-          <Globe size={12} />
-          <Text style={{ color: colors.muted, fontFamily: fonts.semibold, fontSize: 11 }}>
-            {LANG_SHORT[lang]}
-          </Text>
-        </TouchableOpacity>
-        <TouchableOpacity onPress={onOpenSupport} activeOpacity={0.7} hitSlop={10}>
-          <DotsVertical size={22} />
-        </TouchableOpacity>
-      </View>
-    </View>
-  );
-}
-
-/* ---------- Revoked banner ---------- */
-
-function RevokedBanner() {
-  const { t } = useT();
-  return (
-    <View
-      style={{
-        flexDirection: 'row',
-        gap: 11,
-        padding: 13,
-        borderRadius: 14,
-        backgroundColor: tint.dangerBg,
-        borderWidth: 1,
-        borderColor: 'rgba(239,106,91,0.42)',
-        marginBottom: 11,
-      }}
-    >
-      <Warning size={22} color={colors.danger} />
-      <View style={{ flex: 1, minWidth: 0 }}>
-        <Text style={{ color: colors.danger, fontFamily: fonts.bold, fontSize: 14 }}>
-          {t('status.revoked.title')}
-        </Text>
-        <Text style={{ color: '#e89aa2', fontFamily: fonts.regular, fontSize: 11.5, lineHeight: 17, marginTop: 3 }}>
-          {t('status.revoked.desc')}
-        </Text>
-      </View>
-    </View>
-  );
-}
-
-/* ---------- Connection card ---------- */
-
-const META: Record<
-  WsStatus,
-  { color: string; bg: string; border: string; labelKey: string }
-> = {
-  connected: { color: colors.connected, bg: tint.connectedBg, border: tint.connectedBorder, labelKey: 'status.connected' },
-  connecting: { color: colors.warn, bg: tint.warnBg, border: tint.warnBorder, labelKey: 'status.connecting' },
-  reconnecting: { color: colors.warn, bg: tint.warnBg, border: tint.warnBorder, labelKey: 'status.reconnecting' },
-  disconnected: { color: colors.danger, bg: tint.dangerBg, border: tint.dangerBorder, labelKey: 'status.disconnected' },
-};
-
-function ConnectionCard({
-  url,
-  status,
-  queuedCount,
-}: {
-  url: string;
-  status: WsStatus;
-  queuedCount: number;
-}) {
-  const { t } = useT();
-  const m = META[status];
-  const showBuffer = status !== 'connected' && queuedCount > 0;
-
-  return (
-    <LinearGradient
-      colors={[m.bg, colors.inset]}
-      start={{ x: 0, y: 0 }}
-      end={{ x: 0.6, y: 1 }}
-      style={{ borderRadius: radius.lg, borderWidth: 1, borderColor: m.border, padding: 16 }}
-    >
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 14 }}>
-        <View style={{ width: 50, height: 50, alignItems: 'center', justifyContent: 'center' }}>
-          {status === 'connected' ? (
-            <>
-              <ExpandingRing color="rgba(54,192,126,0.5)" />
-              <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: 999, backgroundColor: tint.connectedBg }} />
-              <CheckRing size={24} />
-            </>
-          ) : status === 'disconnected' ? (
-            <>
-              <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: 999, backgroundColor: 'rgba(239,106,91,0.14)' }} />
-              <PhoneOff size={26} />
-            </>
-          ) : (
-            <>
-              <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: 999, backgroundColor: 'rgba(229,165,59,0.13)' }} />
-              <Spin>
-                <SpinnerArc size={34} />
-              </Spin>
-            </>
-          )}
-        </View>
-        <View style={{ flex: 1, minWidth: 0 }}>
-          <Label color={m.color} style={{ fontFamily: fonts.monoSemibold, fontSize: 10 }}>
-            {t('status.label')}
-          </Label>
-          <Text style={{ color: m.color, fontFamily: fonts.bold, fontSize: 24, marginTop: 2 }}>
-            {t(m.labelKey as never)}
-          </Text>
-        </View>
-      </View>
-
-      <View style={{ height: 1, backgroundColor: m.border, marginVertical: 12 }} />
-
-      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-        <View style={{ flex: 1, minWidth: 0 }}>
-          <Label color={colors.muted2} style={{ fontFamily: fonts.monoSemibold, fontSize: 9 }}>
-            {t('status.pos')}
-          </Label>
-          <Text
-            numberOfLines={1}
-            style={{
-              fontFamily: fonts.monoMedium,
-              fontSize: 13,
-              marginTop: 3,
-              color: status === 'disconnected' ? colors.faint : colors.textSoft,
-              textDecorationLine: status === 'disconnected' ? 'line-through' : 'none',
-            }}
-          >
-            {url}
-          </Text>
-        </View>
-        <CopyButton value={url} />
-      </View>
-
-      {showBuffer ? (
-        <View
-          style={{
-            marginTop: 11,
-            flexDirection: 'row',
-            alignItems: 'center',
-            gap: 9,
-            paddingHorizontal: 11,
-            paddingVertical: 9,
-            borderRadius: 10,
-            backgroundColor: tint.warnSoft,
-            borderWidth: 1,
-            borderColor: 'rgba(229,165,59,0.3)',
-          }}
-        >
-          <Database size={18} />
-          <Text style={{ flex: 1, color: '#e9cf94', fontFamily: fonts.regular, fontSize: 12 }}>
-            {t('status.buffered')}
-          </Text>
-          <Text
-            style={{
-              fontFamily: fonts.monoBold,
-              fontSize: 13,
-              color: colors.warn,
-              backgroundColor: 'rgba(229,165,59,0.16)',
-              borderRadius: 7,
-              paddingHorizontal: 9,
-              paddingVertical: 2,
-              overflow: 'hidden',
-            }}
-          >
-            {queuedCount}
-          </Text>
-        </View>
-      ) : null}
-    </LinearGradient>
-  );
-}
-
-function CopyButton({ value }: { value: string }) {
-  return (
-    <TouchableOpacity
-      onPress={() => Clipboard.setStringAsync(value)}
-      activeOpacity={0.7}
-      style={{
-        width: 34,
-        height: 34,
-        borderRadius: 9,
-        backgroundColor: colors.surface,
-        borderWidth: 1,
-        borderColor: colors.border,
-        alignItems: 'center',
-        justifyContent: 'center',
-      }}
-    >
-      <Copy size={15} />
+    <TouchableOpacity accessibilityRole="button" accessibilityLabel={`${title}. ${description}`} onPress={onPress} activeOpacity={0.75} style={styles.settingsRow}>
+      {icon}<View style={{ flex: 1 }}><Text style={styles.settingsTitle}>{title}</Text><Text style={styles.settingsDescription}>{description}</Text></View><Text style={{ color: colors.muted, fontSize: 24 }}>›</Text>
     </TouchableOpacity>
   );
 }
 
-/* ---------- Active call banner ---------- */
-
-function ActiveCallBanner({ call, connected }: { call: ActiveCall; connected: boolean }) {
-  const { t } = useT();
-  const secs = useElapsed(call.startedAt);
-  const timer = `${pad(Math.floor(secs / 60))}:${pad(secs % 60)}`;
-  const Arrow = call.direction === 'in' ? ArrowIncoming : ArrowOutgoing;
-
-  return (
-    <LinearGradient
-      colors={['rgba(110,139,255,0.22)', 'rgba(110,139,255,0.04)']}
-      start={{ x: 0, y: 0 }}
-      end={{ x: 1, y: 1 }}
-      style={{ borderRadius: radius.xl, borderWidth: 1.5, borderColor: 'rgba(110,139,255,0.6)', padding: 18 }}
-    >
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 9 }}>
-        <Blink>
-          <View style={{ width: 9, height: 9, borderRadius: 5, backgroundColor: colors.brand }} />
-        </Blink>
-        <Text style={{ color: colors.brand, fontFamily: fonts.monoBold, fontSize: 11, letterSpacing: 1.2 }}>
-          {(call.direction === 'in' ? t('call.incoming.live') : t('call.outgoing.live')).toUpperCase()}
-        </Text>
-      </View>
-
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 13, marginTop: 14 }}>
-        <View style={{ width: 54, height: 54, alignItems: 'center', justifyContent: 'center' }}>
-          <ExpandingRing color="rgba(110,139,255,0.5)" duration={1800} />
-          <ExpandingRing color="rgba(110,139,255,0.5)" duration={1800} delay={900} />
-          <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: 999, backgroundColor: 'rgba(110,139,255,0.16)' }} />
-          <Arrow size={26} color={colors.brand} />
-        </View>
-        <View style={{ flex: 1, minWidth: 0 }}>
-          <Text style={{ color: colors.text, fontFamily: fonts.monoBold, fontSize: 21 }} numberOfLines={1}>
-            {call.phone || t('call.noNumber')}
-          </Text>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 5 }}>
-            <Clock size={13} />
-            <Text style={{ color: colors.brand, fontFamily: fonts.monoSemibold, fontSize: 14 }}>{timer}</Text>
-          </View>
-        </View>
-      </View>
-
-      {connected ? (
-        <View
-          style={{
-            marginTop: 14,
-            flexDirection: 'row',
-            alignItems: 'center',
-            gap: 7,
-            paddingHorizontal: 11,
-            paddingVertical: 8,
-            borderRadius: 9,
-            backgroundColor: tint.connectedBg,
-            borderWidth: 1,
-            borderColor: tint.connectedBorder,
-          }}
-        >
-          <CheckRing size={16} />
-          <Text style={{ color: '#9fdcc0', fontFamily: fonts.medium, fontSize: 12 }}>
-            {t('call.sentToPos')}
-          </Text>
-        </View>
-      ) : null}
-    </LinearGradient>
-  );
-}
-
-function CompactConnected({ url, status }: { url: string; status: WsStatus }) {
-  const { t } = useT();
-  const m = META[status];
-  return (
-    <LinearGradient
-      colors={[tint.connectedSoft, colors.inset]}
-      start={{ x: 0, y: 0 }}
-      end={{ x: 0.6, y: 1 }}
-      style={{
-        borderRadius: radius.lg,
-        borderWidth: 1,
-        borderColor: 'rgba(54,192,126,0.28)',
-        padding: 14,
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 11,
-      }}
-    >
-      <CheckRing size={22} color={m.color} />
-      <View style={{ flex: 1, minWidth: 0 }}>
-        <Text style={{ color: m.color, fontFamily: fonts.bold, fontSize: 15 }}>{t(m.labelKey as never)}</Text>
-        <Text numberOfLines={1} style={{ color: colors.muted2, fontFamily: fonts.monoMedium, fontSize: 11, marginTop: 1 }}>
-          {url}
-        </Text>
-      </View>
-    </LinearGradient>
-  );
-}
-
-/* ---------- Detection row ---------- */
-
-function DetectionRow({ stopped, onFix }: { stopped: boolean; onFix?: () => void }) {
-  const { t } = useT();
-  if (stopped) {
-    return (
-      <View
-        style={{
-          marginTop: 11,
-          flexDirection: 'row',
-          alignItems: 'center',
-          gap: 10,
-          paddingHorizontal: 13,
-          paddingVertical: 11,
-          borderRadius: radius.md,
-          backgroundColor: tint.dangerSoft,
-          borderWidth: 1,
-          borderColor: 'rgba(239,106,91,0.38)',
-        }}
-      >
-        <Blink>
-          <View style={{ width: 9, height: 9, borderRadius: 5, backgroundColor: colors.danger }} />
-        </Blink>
-        <Text style={{ flex: 1, color: colors.danger, fontFamily: fonts.semibold, fontSize: 12.5 }}>
-          {t('status.detect.stopped')}
-        </Text>
-        <TouchableOpacity
-          onPress={onFix}
-          activeOpacity={0.85}
-          style={{
-            height: 30,
-            paddingHorizontal: 12,
-            borderRadius: 8,
-            backgroundColor: colors.danger,
-            alignItems: 'center',
-            justifyContent: 'center',
-          }}
-        >
-          <Text style={{ color: '#2C1011', fontFamily: fonts.bold, fontSize: 12 }}>{t('status.fix')}</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
-  return (
-    <View
-      style={{
-        marginTop: 11,
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 10,
-        paddingHorizontal: 13,
-        paddingVertical: 10,
-        borderRadius: radius.md,
-        backgroundColor: colors.inset,
-        borderWidth: 1,
-        borderColor: colors.border,
-      }}
-    >
-      <Pulse duration={1800}>
-        <View
-          style={{
-            width: 9,
-            height: 9,
-            borderRadius: 5,
-            backgroundColor: colors.connected,
-            shadowColor: colors.connected,
-            shadowOpacity: 0.7,
-            shadowRadius: 8,
-          }}
-        />
-      </Pulse>
-      <Text style={{ flex: 1, color: colors.textSoft, fontFamily: fonts.medium, fontSize: 12.5 }}>
-        {t('status.detect.active')}
-      </Text>
-    </View>
-  );
-}
-
-/* ---------- Event list ---------- */
-
-function EventList({
-  log,
-  status,
-  queuedCount,
-}: {
-  log: CallLogEntry[];
-  status: WsStatus;
-  queuedCount: number;
-}) {
-  const { t } = useT();
-  const meta =
-    status === 'connected'
-      ? { text: t('status.live'), color: colors.connected, live: true }
-      : queuedCount > 0
-      ? { text: `${t('status.bufferedShort')} · ${queuedCount}`, color: colors.warn, live: false }
-      : { text: t('status.paused'), color: colors.muted2, live: false };
-
-  // Approximate which recent entries are still buffered (newest N).
-  const bufferedUntil = status !== 'connected' ? Math.min(queuedCount, log.length) : 0;
-
-  return (
-    <View style={{ flex: 1, marginTop: 13, minHeight: 0 }}>
-      <View
-        style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          paddingHorizontal: space.lg,
-          paddingBottom: 8,
-        }}
-      >
-        <Label>{t('status.events')}</Label>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
-          {meta.live ? (
-            <Pulse duration={1600}>
-              <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.connected }} />
-            </Pulse>
-          ) : null}
-          <Text style={{ color: meta.color, fontFamily: fonts.mono, fontSize: 11 }}>{meta.text}</Text>
-        </View>
-      </View>
-
-      {log.length === 0 ? (
-        <EmptyState />
-      ) : (
-        <ScrollView contentContainerStyle={{ paddingHorizontal: space.lg, paddingBottom: 8, gap: 7 }}>
-          {log.map((e, i) => (
-            <EventRow key={e.id} entry={e} buffered={i < bufferedUntil} />
-          ))}
-        </ScrollView>
-      )}
-    </View>
-  );
-}
-
-function EventRow({ entry, buffered }: { entry: CallLogEntry; buffered: boolean }) {
-  const { t } = useT();
-  const isIn = entry.type === 'call_start' && entry.direction === 'in';
-  const isOut = entry.type === 'call_start' && entry.direction === 'out';
-  const ended = entry.type === 'call_end';
-
-  const iconBg = isIn ? tint.connectedSoft : isOut ? tint.outgoingBg : colors.raised;
-  const title = ended ? t('call.ended') : isOut ? t('call.outgoing') : t('call.incoming');
-
-  return (
-    <View
-      style={{
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 11,
-        paddingHorizontal: 11,
-        paddingVertical: 10,
-        borderRadius: radius.md,
-        backgroundColor: colors.inset,
-        borderWidth: 1,
-        borderColor: buffered ? colors.borderStrong : colors.border,
-        borderStyle: buffered ? 'dashed' : 'solid',
-        opacity: buffered ? 0.9 : 1,
-      }}
-    >
-      <View style={{ width: 32, height: 32, borderRadius: 9, backgroundColor: iconBg, alignItems: 'center', justifyContent: 'center' }}>
-        {isIn ? <ArrowIncoming /> : isOut ? <ArrowOutgoing /> : <CallEnded />}
-      </View>
-      <View style={{ flex: 1, minWidth: 0 }}>
-        <Text style={{ color: ended ? colors.muted : colors.text, fontFamily: fonts.semibold, fontSize: 12.5 }}>
-          {title}
-        </Text>
-        <Text style={{ color: ended ? colors.muted2 : colors.brand, fontFamily: fonts.monoMedium, fontSize: 13, marginTop: 1 }}>
-          {entry.phone || t('call.noNumber')}
-        </Text>
-      </View>
-      {buffered ? (
-        <Text style={{ color: colors.warn, fontFamily: fonts.monoSemibold, fontSize: 10 }}>
-          {t('status.bufferedShort')}
-        </Text>
-      ) : (
-        <Text style={{ color: colors.muted2, fontFamily: fonts.mono, fontSize: 11 }}>{formatTime(entry.at)}</Text>
-      )}
-    </View>
-  );
-}
-
-function EmptyState() {
-  const { t } = useT();
-  return (
-    <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 34, paddingBottom: 20 }}>
-      <View
-        style={{
-          width: 72,
-          height: 72,
-          borderRadius: 20,
-          backgroundColor: colors.inset,
-          borderWidth: 1,
-          borderColor: colors.borderStrong,
-          borderStyle: 'dashed',
-          alignItems: 'center',
-          justifyContent: 'center',
-          marginBottom: 18,
-        }}
-      >
-        <PhoneFill size={34} color={colors.muted2} />
-      </View>
-      <Text style={{ color: colors.textSoft, fontFamily: fonts.semibold, fontSize: 16 }}>
-        {t('status.empty.title')}
-      </Text>
-      <Text style={{ color: colors.muted, fontFamily: fonts.regular, fontSize: 12.5, lineHeight: 19, textAlign: 'center', marginTop: 6 }}>
-        {t('status.empty.desc')}
-      </Text>
-    </View>
-  );
-}
-
-/* ---------- Footer ---------- */
-
-function Footer({
-  connected,
-  onSendTest,
-  onRepair,
-}: {
-  connected: boolean;
-  onSendTest: () => void;
-  onRepair: () => void;
-}) {
-  const { t } = useT();
-  return (
-    <View
-      style={{
-        paddingHorizontal: space.lg,
-        paddingTop: 10,
-        paddingBottom: 10,
-        borderTopWidth: 1,
-        borderTopColor: colors.inset,
-      }}
-    >
-      <Button
-        label={connected ? t('status.test') : t('status.test.disabled')}
-        variant={connected ? 'primary' : 'disabled'}
-        height={46}
-        icon={connected ? <Send size={17} /> : <Send size={17} color={colors.faint} />}
-        onPress={onSendTest}
-        disabled={!connected}
-      />
-      <Button
-        label={t('status.repair')}
-        variant="secondary"
-        height={42}
-        style={{ marginTop: 7 }}
-        onPress={onRepair}
-      />
-    </View>
-  );
-}
+const styles = StyleSheet.create({
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: space.lg, paddingBottom: 12 },
+  brand: { flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 },
+  appIcon: { width: 38, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  brandTitle: { color: colors.text, fontFamily: fonts.bold, fontSize: 17 },
+  brandSubtitle: { color: colors.muted, fontFamily: fonts.regular, fontSize: 11 },
+  menu: { minHeight: 44, width: 44, alignItems: 'center', justifyContent: 'center' },
+  content: { paddingHorizontal: space.lg, paddingBottom: space.xl, gap: 10 },
+  statusCard: { padding: 20, borderRadius: radius.xl, borderWidth: 1, marginBottom: 8 },
+  statusLabel: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  dot: { width: 9, height: 9, borderRadius: 5 },
+  statusTitle: { fontFamily: fonts.bold, fontSize: 34, lineHeight: 42, marginTop: 12, marginBottom: 5 },
+  description: { color: colors.textSoft, fontFamily: fonts.regular, fontSize: 13, lineHeight: 20 },
+  backgroundNote: { color: colors.muted, fontFamily: fonts.regular, fontSize: 12, lineHeight: 18, marginTop: 14 },
+  sectionHeading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  sectionTitle: { color: colors.text, fontFamily: fonts.bold, fontSize: 17, marginBottom: 2 },
+  count: { color: colors.muted, fontFamily: fonts.monoSemibold, fontSize: 13 },
+  empty: { alignItems: 'center', gap: 8, padding: 22, backgroundColor: colors.inset, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, borderStyle: 'dashed' },
+  emptyTitle: { color: colors.text, fontFamily: fonts.semibold, fontSize: 16 },
+  posCard: { flexDirection: 'row', alignItems: 'center', gap: 8, padding: 14, backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border },
+  posName: { color: colors.text, fontFamily: fonts.semibold, fontSize: 16 },
+  posState: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 5 },
+  smallDot: { width: 6, height: 6, borderRadius: 3 },
+  posStateText: { fontFamily: fonts.medium, fontSize: 12 },
+  address: { color: colors.muted2, fontFamily: fonts.mono, fontSize: 10, marginTop: 5 },
+  removeButton: { minHeight: 44, paddingHorizontal: 10, justifyContent: 'center' },
+  removeText: { color: colors.danger, fontFamily: fonts.medium, fontSize: 12 },
+  settings: { backgroundColor: colors.inset, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border },
+  settingsRow: { paddingHorizontal: 14, paddingVertical: 15, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  settingsTitle: { color: colors.text, fontFamily: fonts.semibold, fontSize: 14 },
+  settingsDescription: { color: colors.muted, fontFamily: fonts.regular, fontSize: 11, lineHeight: 16, marginTop: 3 },
+  divider: { height: 1, backgroundColor: colors.border, marginLeft: 46 },
+  footer: { flexDirection: 'row', gap: 10, padding: space.lg, paddingBottom: 20, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.bg },
+});

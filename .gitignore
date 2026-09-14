@@ -5,8 +5,8 @@ node_modules/
 .expo/
 dist/
 web-build/
-android/
-ios/
+/android/
+/ios/
 
 # Metro
 .metro-health-check*
@@ -22,7 +22,11 @@ npm-debug.*
 # Local env / secrets
 .env
 .env.local
+.env.telegram
 
 # Design handoff bundle + sample APKs (local only)
 _handoff/
 *.apk
+.native-policy-tests/
+.release-desktop/
+.private/

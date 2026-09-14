@@ -1,6 +1,6 @@
 {
   "name": "alphapos-operator-link",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "main": "index.ts",
   "scripts": {
     "start": "expo start --dev-client",
@@ -8,6 +8,7 @@
     "prebuild": "expo prebuild --platform android --clean",
     "typecheck": "tsc --noEmit",
     "ios": "expo run:ios",
+    "build:apk": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-apk.ps1",
     "build:preview": "dotenv -e .env -- eas build --profile preview --platform android --non-interactive",
     "build:dev": "dotenv -e .env -- eas build --profile development --platform android --non-interactive",
     "build:prod": "dotenv -e .env -- eas build --profile production --platform android --non-interactive",

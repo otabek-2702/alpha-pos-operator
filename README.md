@@ -1,106 +1,83 @@
-# AlphaPOS Operator Link
+# Smart POS Operator 2.0
 
-An Android (React Native / Expo **dev build**) app for the operator phone that
-answers and places client calls. It pairs to a desktop POS (Quasar / Electron)
-by scanning a QR code, then streams the caller's phone number to that desktop
-over the local network via WebSocket so the POS can pop the customer's open
-orders or pre-fill a new order.
+Android operator app with persistent connections to multiple desktop POS machines,
+new-recording uploads, and call reports. The interface defaults to Uzbek.
 
-> **Android only for call reading.** iOS does not expose arbitrary incoming
-> phone numbers to third-party apps (CallKit only surfaces VoIP calls your own
-> app placed). The pairing/streaming UI builds on iOS, but native call-number
-> detection is implemented and supported on Android only.
+## Set up once
 
-> **Not Expo Go.** Call detection and the foreground service are native modules.
-> You must run a **custom dev build**, not Expo Go.
+1. Install the new Android APK and grant phone/call-log, camera, notification,
+   file access and battery permissions from **Ruxsatlar va batareya**.
+2. On each desktop, tap **Operator** to enable receiving. Hold the button to show
+   its QR. On the phone choose **POS qo‘shish** and scan it once.
+3. The phone remembers every POS and sends each call to all saved machines. Use
+   **Sinov yuborish** to check connected POS screens; remove individual POS rows
+   with **O‘chirish**.
+4. Open **Telegram yozuvlari va hisobot**, import the private Telegram setup QR
+   or enter the bot token and two group IDs, then select the Samsung recordings
+   folder. Enable audio uploads and save.
+5. Calls/metrics go to **Smart Food qo'ng'iroqlar ma'lumotlari**; audio files go
+   to **Smart Food ovoz yozuvlari**. Only recordings created after initial setup
+   are uploaded. Existing files are excluded.
 
----
+The desktop saves its mode and permanent pairing credentials independently of
+cashier login. A newer desktop QR includes stable machine identity, allowing
+UDP discovery to recover changed LAN addresses. The POS app must be running,
+and both devices need a reachable local network. An upgrade from old rotating
+credentials may need one initial rescan.
 
-## How it works
+## Background operation and records
 
-1. **Pair** — the desktop POS displays a QR encoding
-   `ws://<desktop-lan-ip>:8765?token=<token>`. The operator scans it. The URL
-   is stored and the app connects to it verbatim (token included).
-2. **Detect** — `react-native-call-detection` reports phone-state changes. The
-   app infers call direction from the event sequence and emits protocol
-   messages.
-3. **Stream** — messages are sent over the WebSocket to the desktop, which is
-   the server. The app reconnects automatically and buffers events during brief
-   drops.
-4. **Stay alive** — a foreground service keeps the process resident so call
-   detection keeps working while the app is backgrounded on the dedicated
-   operator phone.
+The Android foreground service owns call detection, sockets, reconnects, file
+scanning and uploads. It runs independently of the React screen, restarts after
+normal phone boot/unlock and package updates, and continues when the UI is
+swiped away. Android **Force stop** and Samsung's own sleeping-app controls can
+still stop it; the system does not allow an ordinary app to override Force stop.
+The permissions screen checks actual battery/file grants. On Samsung, also
+exclude Operator from sleeping/deep-sleeping apps.
 
-The desktop URL persists (`AsyncStorage`), so on the next launch the app skips
-the scanner and reconnects to the last paired desktop.
+**Ishlash tarixi** records service periods. An unexpected shutdown uses the last
+heartbeat as an approximate end; it does not invent an exact shutdown time.
 
----
+Call records retain observed answer delay, Android call-log talk duration,
+missed/rejected outcomes, observed overlap with another call, and callback
+attempts versus confirmed conversations. Missing/ambiguous timestamps are null.
+Outgoing dialing alone does not prove a connection. Callback updates edit the
+original Telegram report. Customer names come from the POS's existing recent
+orders lookup; unmatched callers remain unnamed.
 
-## Wire protocol
+Audio and reports use durable SQLite queues. Pairing credentials and the bot
+token are encrypted using Android Keystore. Tokens are not bundled into the APK.
+The app uploads original audio as Telegram documents (maximum 50 MB), waiting
+for stable files and idle calls. Telegram does not support upload idempotency:
+a rare accepted upload whose response is lost can appear twice on retry.
 
-- The **desktop is the WebSocket server**; this app is the **client**.
-- The QR encodes the full URL `ws://<desktop-lan-ip>:8765?token=<token>` and the
-  app connects to it exactly as scanned.
-- Messages the app **sends** (JSON, one per event — and nothing else):
+## Source and verification
 
-  ```json
-  { "type": "call_start", "phone": "<raw number from OS>", "direction": "in" }
-  { "type": "call_start", "phone": "<raw number from OS>", "direction": "out" }
-  { "type": "call_end",   "phone": "<raw number>" }
-  ```
+- `App.tsx`, `src/operator.ts`, `src/operator-model.ts`: configuration, validation,
+  legacy migration and native runtime bridge.
+- `src/screens/`: simplified home, scanner, real permission status, Telegram and
+  service-period history.
+- `plugins/operator-native/`: native service, boot receiver, encrypted settings,
+  recording queue and call ledger. These templates are copied during prebuild;
+  edit them instead of generated `android/` files.
+- `tests/operator-model.test.cjs`: pairing, migration and credential redaction.
+- `scripts/test-native-policy.ps1`: executable Kotlin recording policy checks.
+- `tests/android/`: actual Android SQLite, Keystore and synthetic call-log checks.
+- `scripts/telegram-setup.mjs`: local bot/group verification and branding; reads
+  ignored `.env.telegram`. Never commit its token or private provisioning QR.
 
-- The **raw** number is sent as reported by the OS. The desktop normalizes it.
-
-### Android call-event mapping
-
-`react-native-call-detection` reports `Incoming`, `Offhook`, `Disconnected`,
-`Missed` on Android (with `readPhoneNumber=true` supplying the number).
-Direction is inferred by tracking the sequence:
-
-| OS event             | Condition                       | Action                              |
-| -------------------- | ------------------------------- | ----------------------------------- |
-| `Incoming` (+number) | —                               | send `call_start` `direction: "in"` |
-| `Offhook` (+number)  | preceded by `Incoming`          | nothing (incoming call was answered)|
-| `Offhook` (+number)  | **no** preceding `Incoming`     | send `call_start` `direction: "out"`|
-| `Disconnected`/`Missed` | a call was being tracked     | send `call_end`, reset flags        |
-
----
-
-## Project layout
-
-```
-App.tsx                                  # picks Pair vs Status screen by saved URL
-index.ts                                 # registerRootComponent entry
-app.json                                 # permissions + plugins (camera, build-props, foreground service)
-eas.json                                 # EAS build profiles (development / preview / production)
-plugins/withCallForegroundService.js     # config plugin: foreground service (manifest + Kotlin + autostart)
-src/
-  storage.ts                             # persist / load / clear the paired desktop URL
-  hooks/useWebSocket.ts                  # connect, status, send(), backoff reconnect, offline buffer
-  hooks/useCallBridge.ts                 # CallDetectorManager -> protocol messages
-  screens/PairScreen.tsx                 # full-screen QR scanner (expo-camera, qr only)
-  screens/StatusScreen.tsx              # connection status, address, re-pair, live event log
-  types/call-detection.d.ts             # types for react-native-call-detection
+```powershell
+npm run typecheck
+node --test tests/operator-model.test.cjs
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-native-policy.ps1
 ```
 
----
-
-## Permissions
-
-Requested at runtime with rationale:
-
-- **CAMERA** — scan the pairing QR (`expo-camera`).
-- **READ_PHONE_STATE** and **READ_CALL_LOG** — **both** are required on
-  Android 9+ to read the incoming caller number. Without `READ_CALL_LOG` the
-  number comes back **empty**.
-- **POST_NOTIFICATIONS** (Android 13+) — for the foreground-service
-  notification.
-
-Declared for the foreground service: `FOREGROUND_SERVICE`,
-`FOREGROUND_SERVICE_DATA_SYNC`. Network: `INTERNET`, `ACCESS_NETWORK_STATE`.
+Native services require a standalone APK or Expo development build. Expo Go and
+iOS do not provide this Android operator runtime. See
+[the release and phone test notes](docs/operator-2-validation.md) for validation
+results and the remaining Samsung-specific checks.
 
 ---
-
 ## Prerequisites
 
 - Node.js 18+ and npm.
@@ -135,7 +112,7 @@ Then start the bundler and connect the dev client:
 npx expo start --dev-client
 ```
 
-Open the installed **AlphaPOS Operator Link** dev build on the phone; it
+Open the installed **Operator** dev build on the phone; it
 connects to Metro over the LAN (or scan the QR shown in the terminal). Grant the
 camera and phone permissions when prompted, then scan the POS pairing QR.
 
@@ -170,50 +147,81 @@ an Expo access token instead of an interactive login:
 The first build auto-generates EAS-managed Android signing credentials — no
 keystore setup required.
 
-### Alternative: local build (no EAS cloud)
+### Fast standalone APK on Windows (no EAS queue)
 
-Requires Android Studio + SDK and a connected device/emulator. This runs
-`expo prebuild` (which executes the config plugin) and compiles locally:
+With JDK 17 and the Android SDK installed, build locally:
 
-```bash
-npm install
+```powershell
+npm run build:apk
+```
+
+The script finds JDK 17 in the Gradle JDK cache when `JAVA_HOME` is unset,
+uses `ANDROID_HOME` (or the standard Windows SDK location), refreshes the
+native project without cleaning, and runs a release build with Gradle caching.
+The first build downloads missing Gradle/SDK/Maven components; later builds
+reuse them. One Gradle worker and one native compilation job limit memory use
+on this PC.
+
+Output: `dist/operator.apk`. It includes the JavaScript bundle and runs without
+Metro. The default APK includes both `arm64-v8a` and `armeabi-v7a`, covering
+64-bit and older 32-bit ARM phones. For an emulator-only build:
+
+```powershell
+npm run build:apk -- -Architectures 'x86_64'
+```
+
+Packaging filters to the requested architectures and checks that each contains
+the required native libraries before copying the APK to `dist`.
+
+The generated project's release build uses the local debug signing key by
+default, suitable for internal testing. Updating an existing EAS-signed install
+requires its matching signing key; see Expo's local release signing guide:
+<https://docs.expo.dev/guides/local-app-production/>. This local script does not
+apply EAS profile settings such as the `preview` OTA update channel.
+
+For a cloud-built, EAS-signed standalone APK, use the existing `preview` profile
+(`production` creates an `.aab`, and `development` needs Metro):
+
+```powershell
+npx --yes eas-cli build --profile preview --platform android
+```
+
+Authenticate with `eas login`, or load the existing `.env` token without printing
+it (the npm `build:preview` script does this when `eas-cli` is installed):
+
+```powershell
+.\node_modules\.bin\dotenv.cmd -e .env -- npx --yes eas-cli build --profile preview --platform android --non-interactive
+```
+
+As checked September 12, 2026, Expo Free includes 15 Android builds per month
+in a low-priority queue. Queue time varies, so local builds with cached tools
+are the more predictable choice for repeated builds:
+<https://expo.dev/pricing>.
+
+For interactive development with a connected device/emulator instead:
+
+```powershell
 npx expo run:android
 ```
 
-If you ever need to inspect or reset the generated native project:
-
-```bash
-npx expo prebuild --platform android --clean
-```
-
-The `android/` directory is generated and git-ignored — edit `app.json` and the
-config plugin, not the native files.
+The `android/` directory is generated and git-ignored. Edit `app.json` and the
+config plugin for persistent native changes. Avoid `prebuild --clean` for
+routine builds because it discards the generated project's incremental cache.
 
 ---
 
 ## Testing the protocol without the real POS
 
-A minimal Node WebSocket server that prints what the app sends (`npm i ws`
-first, then `node test-server.js`):
+Start the two local emulator POS peers:
 
-```js
-// test-server.js
-const { WebSocketServer } = require('ws');
-const PORT = 8765;
-const wss = new WebSocketServer({ port: PORT });
-
-wss.on('connection', (socket, req) => {
-  console.log('operator connected:', req.url); // includes ?token=...
-  socket.on('message', (data) => console.log('event:', data.toString()));
-  socket.on('close', () => console.log('operator disconnected'));
-});
-
-console.log(`Mock POS listening on ws://0.0.0.0:${PORT}`);
+```powershell
+node scripts/operator-mock.mjs
 ```
 
-Find your desktop's LAN IP (`ipconfig` on Windows, `ifconfig`/`ip addr`
-elsewhere) and encode a QR for `ws://<that-ip>:8765?token=test123` (any QR
-generator works). Scan it from the app and place/receive a call.
+The test helper uses TCP 8765/8767 with fake test credentials, acknowledges
+completed-call records and returns a synthetic customer name. It logs event
+types without credentials or phone numbers. The emulator scenario runner can
+configure both targets using Android's host alias `10.0.2.2`.
 
 ---
 
@@ -227,7 +235,7 @@ generator works). Scan it from the app and place/receive a call.
   allow it. Cleartext `ws://` is enabled via `usesCleartextTraffic` in
   `app.json`.
 - **Detection stops after the screen locks.** Confirm the persistent
-  "AlphaPOS Operator Link" notification is present (that is the foreground
+  "Smart POS Operator" notification is present (that is the foreground
   service). On aggressive OEM ROMs (Xiaomi, Huawei, Samsung), disable battery
   optimization / enable "autostart" for the app.
 - **Nothing happens in Expo Go.** Expected — call detection and the foreground
@@ -235,4 +243,3 @@ generator works). Scan it from the app and place/receive a call.
 - **`new WebSocket` rejected on a release build.** Ensure
   `usesCleartextTraffic: true` (already set) survived prebuild, or pair to a
   `wss://` endpoint.
-```

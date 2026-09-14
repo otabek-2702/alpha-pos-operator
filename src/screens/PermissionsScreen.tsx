@@ -1,374 +1,129 @@
 import { useCallback, useEffect, useState } from 'react';
-import {
-  ActivityIndicator,
-  AppState,
-  ScrollView,
-  Text,
-  TouchableOpacity,
-  View,
-} from 'react-native';
+import { ActivityIndicator, AppState, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
-import { Bell, Camera, CallLog, CheckCircle, Info, Phone, Star, Warning, XCircle } from '../components/Icons';
-import { Button, Label, Screen } from '../components/ui';
-import { useT } from '../i18n';
-import {
-  checkPermissions,
-  hasRequiredPermissions,
-  openAppSettings,
-  PermissionState,
-  requestAllPermissions,
-  requestBatteryExemption,
-  wasBatteryPrompted,
-} from '../permissions';
+import { Bell, CallLog, Camera, CheckCircle, Phone, Settings, XCircle } from '../components/Icons';
+import { Button, Screen } from '../components/ui';
+import { getRuntimeAccess, openBatterySettings, requestAllFilesAccess, requestBatteryAccess } from '../operator';
+import { checkPermissions, hasRequiredPermissions, openAppSettings, requestAllPermissions, type PermissionState } from '../permissions';
 import { colors, fonts, radius, space, tint } from '../theme';
 
 export interface PermissionsScreenProps {
   onReady: () => void;
+  onClose?: () => void;
 }
 
-type PermKey = keyof PermissionState;
+const ROWS = [
+  { key: 'phone', title: 'Telefon holati', description: 'Kiruvchi va chiquvchi qo‘ng‘iroqlarni aniqlash', Icon: Phone },
+  { key: 'callLog', title: 'Qo‘ng‘iroqlar tarixi', description: 'Raqam, vaqt va javobsiz qo‘ng‘iroqlarni aniqlash', Icon: CallLog },
+  { key: 'camera', title: 'Kamera', description: 'POS ni bir marta QR-kod orqali qo‘shish', Icon: Camera },
+  { key: 'notifications', title: 'Bildirishnomalar', description: 'Fonda ishlayotgan xizmat holatini ko‘rsatish', Icon: Bell },
+] as const;
 
-interface RowDef {
-  key: PermKey;
-  Icon: (p: { size?: number; color?: string }) => JSX.Element;
-  required: boolean;
-}
-
-const ROWS: RowDef[] = [
-  { key: 'camera', Icon: Camera, required: true },
-  { key: 'phone', Icon: Phone, required: true },
-  { key: 'callLog', Icon: CallLog, required: true },
-  { key: 'notifications', Icon: Bell, required: false },
-];
-
-const LABEL: Record<PermKey, { title: string; desc: string }> = {
-  camera: { title: 'perm.camera', desc: 'perm.camera.desc' },
-  phone: { title: 'perm.phone', desc: 'perm.phone.desc' },
-  callLog: { title: 'perm.calllog', desc: 'perm.calllog.desc' },
-  notifications: { title: 'perm.notif', desc: 'perm.notif.desc' },
-};
-
-export function PermissionsScreen({ onReady }: PermissionsScreenProps) {
-  const { t } = useT();
+export function PermissionsScreen({ onReady, onClose }: PermissionsScreenProps) {
   const [state, setState] = useState<PermissionState | null>(null);
+  const [access, setAccess] = useState<{ allFiles: boolean; battery: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const [attempted, setAttempted] = useState(false);
-  const [batteryDone, setBatteryDone] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => setState(await checkPermissions()), []);
+  const refresh = useCallback(async () => {
+    const [permissions, special] = await Promise.allSettled([checkPermissions(), getRuntimeAccess()]);
+    if (permissions.status === 'fulfilled') setState(permissions.value);
+    else setError('Ruxsatlarni tekshirib bo‘lmadi. Qayta urinib ko‘ring.');
+    if (special.status === 'fulfilled') setAccess(special.value);
+    else setError('Fayl va batareya holatini tekshirib bo‘lmadi. Ilovaning yangi APK versiyasini o‘rnating.');
+  }, []);
 
   useEffect(() => {
-    (async () => {
-      await refresh();
-      setBatteryDone(await wasBatteryPrompted());
-    })();
-    const sub = AppState.addEventListener('change', (s) => {
-      if (s === 'active') refresh();
-    });
-    return () => sub.remove();
+    void refresh();
+    const listener = AppState.addEventListener('change', (next) => { if (next === 'active') void refresh(); });
+    return () => listener.remove();
   }, [refresh]);
 
-  const grant = useCallback(async () => {
+  const act = async (action: () => Promise<unknown>) => {
     setBusy(true);
+    setError(null);
+    try { await action(); await refresh(); }
+    catch { setError('Sozlamani ochib bo‘lmadi. Telefon sozlamalaridan Smart POS Operator ilovasini tanlang.'); }
+    finally { setBusy(false); }
+  };
+
+  const grant = async () => {
     setAttempted(true);
-    try {
-      setState(await requestAllPermissions());
-    } finally {
-      setBusy(false);
-    }
-  }, []);
+    await act(async () => { setState(await requestAllPermissions()); });
+  };
 
-  const handleBattery = useCallback(async () => {
-    await requestBatteryExemption();
-    setBatteryDone(true);
-  }, []);
-
-  if (!state) {
-    return (
-      <Screen>
-        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-          <ActivityIndicator color={colors.text} />
-        </View>
-      </Screen>
-    );
-  }
-
-  const requiredGranted = ROWS.filter((r) => r.required && state[r.key]).length;
-  const requiredTotal = ROWS.filter((r) => r.required).length;
-  const ready = hasRequiredPermissions(state);
-  const someDenied = attempted && ROWS.some((r) => r.required && !state[r.key]);
-  const firstMissing = ROWS.find((r) => r.required && !state[r.key])?.key;
-
-  const subtitle = ready
-    ? t('perm.subtitle.ready')
-    : someDenied
-    ? t('perm.subtitle.blocked')
-    : attempted
-    ? t('perm.subtitle.partial')
-    : t('perm.subtitle');
+  const ready = !!state && hasRequiredPermissions(state);
+  const runtimeComplete = !!state && ROWS.every((row) => state[row.key]);
+  const totalGranted = (state ? ROWS.filter((row) => state[row.key]).length : 0) + (access?.allFiles ? 1 : 0) + (access?.battery ? 1 : 0);
 
   return (
     <Screen>
-      <ScrollView contentContainerStyle={{ padding: space.lg, paddingBottom: space.xl }}>
-        <View style={{ flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between' }}>
-          <Text style={{ color: colors.text, fontFamily: fonts.bold, fontSize: 22 }}>
-            {t('perm.title')}
-          </Text>
-          {attempted || ready ? (
-            <Text
-              style={{
-                fontFamily: fonts.monoSemibold,
-                fontSize: 12,
-                color: ready ? colors.connected : colors.brand,
-              }}
-            >
-              {requiredGranted} / {requiredTotal}
-            </Text>
-          ) : null}
+      <View style={styles.header}>
+        <Text accessibilityRole="header" style={styles.title}>Ruxsatlar va batareya</Text>
+        {onClose ? <TouchableOpacity accessibilityRole="button" accessibilityLabel="Orqaga" onPress={onClose} disabled={busy} style={styles.back}><Text style={styles.backText}>Orqaga</Text></TouchableOpacity> : null}
+      </View>
+      <ScrollView contentContainerStyle={styles.content}>
+        <Text style={styles.description}>Qo‘ng‘iroqlarni POS ga yuborish va ovoz yozuvlarini o‘qish uchun quyidagi ruxsatlarni bering. Ilova har safar haqiqiy ruxsat holatini tekshiradi.</Text>
+        <View style={styles.progressRow}><Text style={styles.progressLabel}>Berilgan ruxsatlar</Text><Text style={[styles.progressLabel, { color: totalGranted === 6 ? colors.connected : colors.brand }]}>{totalGranted} / 6</Text></View>
+        <View style={styles.progress}><View style={{ height: '100%', width: `${totalGranted / 6 * 100}%`, backgroundColor: totalGranted === 6 ? colors.connected : colors.brand, borderRadius: radius.pill }} /></View>
+        {!state ? <ActivityIndicator color={colors.brand} /> : ROWS.map((row) => (
+          <View key={row.key} style={styles.permissionRow}>
+            <row.Icon size={22} color={state[row.key] ? colors.connected : colors.muted} />
+            <View style={{ flex: 1 }}><Text style={styles.label}>{row.title}</Text><Text style={styles.help}>{row.description}</Text></View>
+            <View accessible accessibilityLabel={state[row.key] ? 'Ruxsat berilgan' : 'Ruxsat berilmagan'}>{state[row.key] ? <CheckCircle /> : <XCircle />}</View>
+          </View>
+        ))}
+        <SpecialPermission title="Barcha fayllarga kirish" description="Telefon saqlagan audio yozuvlarni topish uchun Android fayl ruxsati." granted={access?.allFiles ?? false} checked={access !== null} label="Fayllarga ruxsat berish" onPress={() => void act(requestAllFilesAccess)} disabled={busy} />
+        <SpecialPermission title="Batareya cheklovini olib tashlash" description="Ekran o‘chganda ham xizmatning ishlashiga ruxsat bering." granted={access?.battery ?? false} checked={access !== null} label="Batareya ruxsatini berish" onPress={() => void act(requestBatteryAccess)} disabled={busy} />
+
+        <View style={styles.samsungCard}>
+          <Text style={styles.samsungTitle}>Samsung uchun qo‘shimcha sozlama</Text>
+          <Text style={styles.description}>Sozlamalar → Batareya → Fonda foydalanish cheklovlari bo‘limida ilovani “Hech qachon uyquga ketmaydigan ilovalar” ro‘yxatiga qo‘shing. Ilova batareyasi uchun “Cheklanmagan” rejimini tanlang. Bo‘lim nomlari telefon tiliga qarab farq qilishi mumkin.</Text>
+          <Button label="Batareya sozlamalari" variant="secondary" onPress={() => void act(openBatterySettings)} disabled={busy} />
+          <Text style={styles.help}>Ilova qayta yoqilganda xizmatni tiklaydi. Android sozlamalaridagi “Majburan to‘xtatish”dan keyin ilovani qo‘lda ochish kerak. Telefon o‘chgan davrda xizmat ishlamaydi.</Text>
         </View>
-        <Text
-          style={{
-            color: ready ? colors.connected : colors.muted,
-            fontFamily: fonts.regular,
-            fontSize: 13,
-            marginTop: 3,
-            marginBottom: 12,
-          }}
-        >
-          {subtitle}
-        </Text>
-
-        {attempted || ready ? (
-          <View
-            style={{
-              height: 5,
-              borderRadius: radius.pill,
-              backgroundColor: colors.raised,
-              overflow: 'hidden',
-              marginBottom: 14,
-            }}
-          >
-            <View
-              style={{
-                width: `${(requiredGranted / requiredTotal) * 100}%`,
-                height: '100%',
-                borderRadius: radius.pill,
-                backgroundColor: ready ? colors.connected : colors.brand,
-              }}
-            />
-          </View>
-        ) : null}
-
-        <View style={{ gap: 8 }}>
-          {ROWS.map((row) => {
-            const granted = state[row.key];
-            const denied = row.required && attempted && !granted;
-            const highlight = !granted && !denied && row.key === firstMissing;
-            const iconColor = granted ? colors.connected : denied ? colors.danger : colors.muted;
-            return (
-              <View
-                key={row.key}
-                style={{
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: 11,
-                  padding: 10,
-                  borderRadius: radius.md,
-                  backgroundColor: denied
-                    ? tint.dangerSoft
-                    : highlight
-                    ? tint.brandBg
-                    : colors.inset,
-                  borderWidth: 1,
-                  borderColor: denied
-                    ? tint.dangerBorder
-                    : highlight
-                    ? tint.brandBorder
-                    : colors.border,
-                }}
-              >
-                <View
-                  style={{
-                    width: 36,
-                    height: 36,
-                    borderRadius: 10,
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    backgroundColor: granted ? tint.connectedSoft : colors.raised,
-                  }}
-                >
-                  <row.Icon size={18} color={iconColor} />
-                </View>
-                <View style={{ flex: 1, minWidth: 0 }}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                    <Text
-                      style={{
-                        color: denied ? colors.danger : colors.text,
-                        fontFamily: fonts.semibold,
-                        fontSize: 13.5,
-                      }}
-                    >
-                      {t(LABEL[row.key].title as never)}
-                    </Text>
-                    {!granted ? (
-                      <Text
-                        style={{
-                          fontFamily: fonts.monoSemibold,
-                          fontSize: 9,
-                          letterSpacing: 0.6,
-                          color: row.required ? colors.danger : colors.muted2,
-                          borderWidth: 1,
-                          borderColor: row.required ? tint.dangerBorder : colors.borderStrong,
-                          borderRadius: 5,
-                          paddingHorizontal: 4,
-                          paddingVertical: 1,
-                          overflow: 'hidden',
-                        }}
-                      >
-                        {row.required ? t('perm.required') : t('perm.optional')}
-                      </Text>
-                    ) : null}
-                  </View>
-                  <Text
-                    style={{
-                      color: denied ? '#e89aa2' : colors.muted,
-                      fontFamily: fonts.regular,
-                      fontSize: 11.5,
-                      marginTop: 1,
-                    }}
-                  >
-                    {denied ? t('perm.denied.row') : t(LABEL[row.key].desc as never)}
-                  </Text>
-                </View>
-                {granted ? (
-                  <CheckCircle size={22} />
-                ) : denied ? (
-                  <Text
-                    style={{
-                      fontFamily: fonts.monoSemibold,
-                      fontSize: 10,
-                      letterSpacing: 0.4,
-                      color: colors.danger,
-                      borderWidth: 1,
-                      borderColor: tint.dangerBorder,
-                      borderRadius: 6,
-                      paddingHorizontal: 7,
-                      paddingVertical: 3,
-                      overflow: 'hidden',
-                    }}
-                  >
-                    {t('perm.denied.badge')}
-                  </Text>
-                ) : (
-                  <XCircle size={22} />
-                )}
-              </View>
-            );
-          })}
-        </View>
-
-        {/* Battery optimization */}
-        {batteryDone ? (
-          <View
-            style={{
-              marginTop: 10,
-              flexDirection: 'row',
-              alignItems: 'center',
-              gap: 10,
-              padding: 11,
-              borderRadius: radius.md,
-              backgroundColor: tint.connectedSoft,
-              borderWidth: 1,
-              borderColor: 'rgba(54,192,126,0.28)',
-            }}
-          >
-            <Star size={18} />
-            <Text style={{ flex: 1, color: '#9fdcc0', fontFamily: fonts.regular, fontSize: 11.5, lineHeight: 16 }}>
-              {t('perm.battery.done')}
-            </Text>
-          </View>
-        ) : (
-          <View
-            style={{
-              marginTop: 10,
-              flexDirection: 'row',
-              gap: 11,
-              padding: 11,
-              borderRadius: radius.md,
-              backgroundColor: tint.warnSoft,
-              borderWidth: 1,
-              borderColor: 'rgba(229,165,59,0.3)',
-            }}
-          >
-            <Warning size={20} />
-            <View style={{ flex: 1 }}>
-              <Text style={{ color: colors.warn, fontFamily: fonts.semibold, fontSize: 12.5 }}>
-                {t('perm.battery.title')}
-              </Text>
-              <Text style={{ color: '#cdb87a', fontFamily: fonts.regular, fontSize: 11, lineHeight: 16, marginTop: 2 }}>
-                {t('perm.battery.desc')}
-              </Text>
-              <TouchableOpacity
-                onPress={handleBattery}
-                activeOpacity={0.8}
-                style={{
-                  marginTop: 8,
-                  alignSelf: 'flex-start',
-                  height: 32,
-                  paddingHorizontal: 14,
-                  borderRadius: radius.sm,
-                  backgroundColor: 'rgba(229,165,59,0.16)',
-                  borderWidth: 1,
-                  borderColor: 'rgba(229,165,59,0.4)',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-              >
-                <Text style={{ color: colors.warn, fontFamily: fonts.semibold, fontSize: 12 }}>
-                  {t('perm.battery.fix')}
-                </Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        )}
-
-        {someDenied ? (
-          <View
-            style={{
-              marginTop: 12,
-              flexDirection: 'row',
-              gap: 10,
-              padding: 11,
-              borderRadius: radius.md,
-              backgroundColor: colors.inset,
-              borderWidth: 1,
-              borderColor: colors.borderStrong,
-              borderStyle: 'dashed',
-            }}
-          >
-            <Info size={18} />
-            <Text style={{ flex: 1, color: colors.muted, fontFamily: fonts.regular, fontSize: 11, lineHeight: 17 }}>
-              {t('perm.denied.hint')}
-            </Text>
-          </View>
-        ) : null}
+        {attempted && !runtimeComplete ? <View style={styles.notice}><Text style={styles.description}>Agar ruxsat oynasi boshqa ochilmasa, ilova sozlamalarida ruxsatlarni yoqing. Kamera va bildirishnomalar uchun ham ruxsat berish tavsiya etiladi.</Text><Button label="Ilova sozlamalarini ochish" variant="secondary" onPress={() => void act(openAppSettings)} disabled={busy} /></View> : null}
+        {ready && totalGranted < 6 ? <Text style={styles.help}>Qo‘ng‘iroqlar uchun asosiy ruxsatlar berildi. Qolgan ruxsatlar QR skaneri, yozuvlar va fonda ishlash uchun kerak.</Text> : null}
+        {error ? <Text accessibilityLiveRegion="polite" style={styles.error}>{error}</Text> : null}
       </ScrollView>
-
-      <View style={{ padding: space.lg, paddingTop: 12, borderTopWidth: 1, borderTopColor: colors.inset }}>
-        {ready ? (
-          <Button label={t('perm.continue')} onPress={onReady} />
-        ) : someDenied ? (
-          <>
-            <Button label={t('perm.openSettings')} variant="secondary" onPress={openAppSettings} />
-            <Button label={t('perm.continue.disabled')} variant="disabled" height={44} style={{ marginTop: 8 }} />
-          </>
-        ) : (
-          <>
-            <Button label={t('perm.grant')} onPress={grant} loading={busy} />
-            <Button label={t('perm.continue')} variant="disabled" height={46} style={{ marginTop: 8 }} />
-          </>
-        )}
+      <View style={styles.footer}>
+        {!runtimeComplete ? <Button label="Asosiy ruxsatlarni berish" onPress={() => void grant()} loading={busy} disabled={busy} /> : null}
+        <Button label={onClose ? 'Tayyor' : 'Davom etish'} variant={runtimeComplete ? 'primary' : 'secondary'} onPress={onReady} disabled={!ready || busy} />
       </View>
     </Screen>
   );
 }
+
+function SpecialPermission({ title, description, granted, checked, label, onPress, disabled }: { title: string; description: string; granted: boolean; checked: boolean; label: string; onPress: () => void; disabled: boolean }) {
+  return (
+    <View style={styles.special}>
+      <View style={styles.specialHeading}><Settings size={22} color={granted ? colors.connected : colors.warn} /><Text style={[styles.label, { flex: 1 }]}>{title}</Text>{granted ? <CheckCircle /> : <XCircle />}</View>
+      <Text style={styles.description}>{description}</Text>
+      <Text style={[styles.help, { color: granted ? colors.connected : colors.warn }]}>{!checked ? 'Holat olinmadi' : granted ? 'Ruxsat berilgan' : 'Ruxsat berilmagan'}</Text>
+      {!granted ? <Button label={label} variant="secondary" onPress={onPress} disabled={disabled} /> : null}
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: space.lg, paddingBottom: 8, gap: 8 },
+  title: { color: colors.text, fontFamily: fonts.bold, fontSize: 23, flex: 1 },
+  back: { minHeight: 44, paddingLeft: 8, justifyContent: 'center' },
+  backText: { color: colors.brand, fontFamily: fonts.semibold, fontSize: 14 },
+  content: { padding: space.lg, paddingTop: 6, paddingBottom: space.xl, gap: 10 },
+  description: { color: colors.textSoft, fontFamily: fonts.regular, fontSize: 13, lineHeight: 20 },
+  label: { color: colors.text, fontFamily: fonts.semibold, fontSize: 14 },
+  help: { color: colors.muted, fontFamily: fonts.regular, fontSize: 12, lineHeight: 18, marginTop: 3 },
+  progressRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 6 },
+  progressLabel: { color: colors.muted, fontFamily: fonts.semibold, fontSize: 12 },
+  progress: { height: 5, backgroundColor: colors.raised, borderRadius: radius.pill, overflow: 'hidden', marginBottom: 4 },
+  permissionRow: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 13, borderRadius: radius.md, backgroundColor: colors.inset, borderWidth: 1, borderColor: colors.border },
+  special: { padding: 14, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, gap: 8 },
+  specialHeading: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  samsungCard: { padding: 16, marginTop: 4, gap: 10, backgroundColor: tint.brandBg, borderRadius: radius.lg, borderWidth: 1, borderColor: tint.brandBorder },
+  samsungTitle: { color: colors.brand, fontFamily: fonts.bold, fontSize: 16 },
+  notice: { padding: 14, gap: 10, backgroundColor: colors.inset, borderRadius: radius.md },
+  error: { color: colors.danger, fontFamily: fonts.medium, fontSize: 13, lineHeight: 20 },
+  footer: { padding: space.lg, paddingBottom: 20, gap: 8, borderTopWidth: 1, borderTopColor: colors.border },
+});

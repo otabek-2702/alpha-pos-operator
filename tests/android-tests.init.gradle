@@ -1,0 +1,9 @@
+allprojects { project ->
+    project.afterEvaluate {
+        if (project.path == ':app' && project.plugins.hasPlugin('com.android.application')) {
+            project.android.testBuildType = 'release'
+            project.android.defaultConfig.testInstrumentationRunner = 'com.alphapos.operatorlink.OperatorRuntimeInstrumentation'
+            project.android.sourceSets.androidTest.java.srcDir(new File(project.rootDir.parentFile, 'tests/android'))
+        }
+    }
+}

@@ -1,218 +1,97 @@
-import { useState } from 'react';
-import { ActivityIndicator, Text, View } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, AppState, StyleSheet, Text, View } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 
-import { Pulse, ScanLine } from '../components/anim';
+import { ScanLine } from '../components/anim';
 import { CameraOff } from '../components/Icons';
 import { Button, Screen } from '../components/ui';
-import { useT } from '../i18n';
 import { openAppSettings } from '../permissions';
-import { colors, fonts, radius } from '../theme';
+import { colors, fonts, radius, space } from '../theme';
 
 export interface PairScreenProps {
-  onPaired: (url: string) => void;
+  onPaired: (value: string) => Promise<void> | void;
+  onClose: () => void;
+  purpose?: 'pos' | 'telegram';
 }
 
-const RETICLE = 210;
-const CORNER = 36;
-
-export function PairScreen({ onPaired }: PairScreenProps) {
-  const { t } = useT();
-  const [permission, requestPermission] = useCameraPermissions();
+export function PairScreen({ onPaired, onClose, purpose = 'pos' }: PairScreenProps) {
+  const [permission, requestPermission, getPermission] = useCameraPermissions();
   const [error, setError] = useState<string | null>(null);
-  const [scanned, setScanned] = useState('');
-  const [handled, setHandled] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const scanLock = useRef(false);
 
-  if (!permission) {
-    return (
-      <Screen>
-        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-          <ActivityIndicator color={colors.text} />
-        </View>
-      </Screen>
-    );
-  }
+  useEffect(() => {
+    const listener = AppState.addEventListener('change', (next) => { if (next === 'active') void getPermission().catch(() => {}); });
+    return () => listener.remove();
+  }, [getPermission]);
 
-  // Camera denied/revoked (the gate normally grants it, but it can be revoked).
-  if (!permission.granted) {
-    return (
-      <Screen>
-        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 28 }}>
-          <View
-            style={{
-              width: 88,
-              height: 88,
-              borderRadius: 24,
-              backgroundColor: colors.surface,
-              borderWidth: 1,
-              borderColor: colors.border,
-              alignItems: 'center',
-              justifyContent: 'center',
-              marginBottom: 24,
-            }}
-          >
-            <CameraOff size={42} />
-          </View>
-          <Text style={{ color: colors.text, fontFamily: fonts.bold, fontSize: 20, textAlign: 'center' }}>
-            {t('pair.cam.title')}
-          </Text>
-          <Text
-            style={{
-              color: colors.muted,
-              fontFamily: fonts.regular,
-              fontSize: 13,
-              lineHeight: 20,
-              textAlign: 'center',
-              marginTop: 8,
-            }}
-          >
-            {t('pair.cam.desc')}
-          </Text>
-        </View>
-        <View style={{ padding: 16 }}>
-          <Button label={t('pair.cam.grant')} onPress={requestPermission} />
-          <Button
-            label={t('perm.openSettings')}
-            variant="ghost"
-            height={44}
-            style={{ marginTop: 6, borderWidth: 0 }}
-            onPress={openAppSettings}
-          />
-        </View>
-      </Screen>
-    );
-  }
-
-  const onBarcodeScanned = ({ data }: { data: string }) => {
-    if (handled) return;
+  const onBarcodeScanned = async ({ data }: { data: string }) => {
+    if (scanLock.current) return;
+    scanLock.current = true;
     const value = (data ?? '').trim();
-    if (!value.toLowerCase().startsWith('ws://')) {
-      setScanned(value);
-      setError(t('pair.invalid.title'));
+    let supported = purpose === 'pos' && /^wss?:\/\//i.test(value);
+    if (!supported) {
+      try {
+        const parsed = JSON.parse(value);
+        supported = purpose === 'telegram' ? parsed?.type === 'smart_pos_telegram' && parsed?.version === 1 : parsed?.version === 2 && typeof parsed.id === 'string' && typeof parsed.name === 'string' && typeof parsed.url === 'string' && /^wss?:\/\//i.test(parsed.url);
+      } catch { /* Invalid QR contents are handled below without displaying them. */ }
+    }
+    if (!supported) {
+      setError(purpose === 'telegram' ? 'Bu Telegram sozlash QR kodi emas.' : 'Bu POS ulanish kodi emas. POS dagi Operator tugmasini bosib turing va ochilgan QR-kodni skanerlang.');
       return;
     }
+    setSaving(true);
     setError(null);
-    setHandled(true);
-    onPaired(value);
+    try { await onPaired(value); }
+    catch { setError('Sozlamani saqlab bo‘lmadi. QR-kodni tekshirib, qayta urinib ko‘ring.'); }
+    finally { setSaving(false); }
   };
 
-  const cornerColor = error ? colors.danger : colors.brand;
+  if (!permission || !permission.granted) {
+    return (
+      <Screen>
+        <View style={styles.permissionBody}>
+          {!permission ? <ActivityIndicator color={colors.brand} /> : <><CameraOff size={48} /><Text style={styles.title}>Kameraga ruxsat kerak</Text><Text style={styles.description}>Kamera ulanish QR-kodlarini skanerlash uchun ishlatiladi.</Text></>}
+        </View>
+        <View style={styles.footer}>
+          {error ? <Text style={styles.error}>{error}</Text> : null}
+          {permission ? <Button label={permission.canAskAgain ? 'Kameraga ruxsat berish' : 'Ilova sozlamalarini ochish'} onPress={() => { void (permission.canAskAgain ? requestPermission() : openAppSettings()).catch(() => setError('Kamera ruxsatini telefon sozlamalaridan bering.')); }} /> : null}
+          <Button label="Orqaga" variant="secondary" onPress={onClose} />
+        </View>
+      </Screen>
+    );
+  }
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.bgDeep }}>
-      <CameraView
-        style={{ ...StyleSheetAbsolute }}
-        facing="back"
-        barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
-        onBarcodeScanned={handled ? undefined : onBarcodeScanned}
-      />
-      {/* darkening scrim for legibility */}
-      <View style={{ ...StyleSheetAbsolute, backgroundColor: 'rgba(10,13,19,0.45)' }} />
-
-      <Screen padTop style={{ backgroundColor: 'transparent' }}>
-        <View style={{ paddingHorizontal: 20, paddingTop: 12, alignItems: 'center' }}>
-          <Text style={{ color: colors.text, fontFamily: fonts.bold, fontSize: 21 }}>
-            {t('pair.title')}
-          </Text>
-          <Text
-            style={{
-              color: colors.muted,
-              fontFamily: fonts.regular,
-              fontSize: 12.5,
-              lineHeight: 19,
-              textAlign: 'center',
-              marginTop: 5,
-            }}
-          >
-            {t('pair.hint')}
-          </Text>
-        </View>
-
-        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-          <View style={{ width: RETICLE, height: RETICLE }}>
-            <Corner pos="tl" color={cornerColor} />
-            <Corner pos="tr" color={cornerColor} />
-            <Corner pos="bl" color={cornerColor} />
-            <Corner pos="br" color={cornerColor} />
-            {!error ? <ScanLine color={colors.brand} travel={RETICLE - 16} /> : null}
+      <CameraView style={StyleSheet.absoluteFill} facing="back" barcodeScannerSettings={{ barcodeTypes: ['qr'] }} onBarcodeScanned={saving || error ? undefined : onBarcodeScanned} />
+      <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(10,13,19,0.48)' }]} />
+      <Screen style={{ backgroundColor: 'transparent' }}>
+        <View style={styles.heading}><Text accessibilityRole="header" style={styles.title}>{purpose === 'telegram' ? 'Telegramni sozlash' : 'POS qo‘shish'}</Text><Text style={styles.description}>{purpose === 'telegram' ? 'Siz uchun tayyorlangan maxsus Telegram QR-kodini skanerlang.' : 'POS dagi Operator tugmasini bosib turing. QR-kodni faqat bir marta skanerlash kifoya.'}</Text></View>
+        <View style={styles.cameraBody}>
+          <View accessibilityLabel="QR-kodni shu ramka ichiga joylashtiring" style={[styles.reticle, { borderColor: error ? colors.danger : colors.brand }]}>
+            {!saving && !error ? <ScanLine color={colors.brand} travel={218} /> : null}
+            {saving ? <ActivityIndicator size="large" color={colors.brand} /> : null}
           </View>
+          <Text style={styles.scanHint}>{saving ? 'Sozlamalar saqlanmoqda…' : 'QR-kodni ramka ichiga joylashtiring'}</Text>
         </View>
-
-        <View style={{ paddingHorizontal: 16, paddingBottom: 24 }}>
-          {error ? (
-            <View
-              style={{
-                flexDirection: 'row',
-                gap: 10,
-                padding: 13,
-                borderRadius: 14,
-                backgroundColor: 'rgba(239,106,91,0.14)',
-                borderWidth: 1,
-                borderColor: 'rgba(239,106,91,0.4)',
-              }}
-            >
-              <View style={{ flex: 1 }}>
-                <Text style={{ color: colors.danger, fontFamily: fonts.semibold, fontSize: 13 }}>
-                  {t('pair.invalid.title')}
-                </Text>
-                <Text style={{ color: '#e89aa2', fontFamily: fonts.regular, fontSize: 11.5, lineHeight: 17, marginTop: 2 }}>
-                  {t('pair.invalid.desc')}{' '}
-                  <Text style={{ fontFamily: fonts.mono, color: colors.textSoft }}>
-                    {scanned.slice(0, 40) || '—'}
-                  </Text>
-                </Text>
-              </View>
-            </View>
-          ) : (
-            <View style={{ alignItems: 'center' }}>
-              <View
-                style={{
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: 8,
-                  paddingHorizontal: 14,
-                  paddingVertical: 9,
-                  borderRadius: radius.pill,
-                  backgroundColor: 'rgba(10,14,20,0.6)',
-                  borderWidth: 1,
-                  borderColor: colors.border,
-                }}
-              >
-                <Pulse>
-                  <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: colors.brand }} />
-                </Pulse>
-                <Text style={{ color: colors.textSoft, fontFamily: fonts.monoMedium, fontSize: 12 }}>
-                  {t('pair.searching')}
-                </Text>
-              </View>
-            </View>
-          )}
+        <View style={styles.footer}>
+          {error ? <><Text accessibilityLiveRegion="polite" style={styles.error}>{error}</Text><Button label="Qayta skanerlash" onPress={() => { scanLock.current = false; setError(null); }} /></> : null}
+          <Button label="Orqaga" variant="secondary" onPress={onClose} disabled={saving} />
         </View>
       </Screen>
     </View>
   );
 }
 
-const StyleSheetAbsolute = {
-  position: 'absolute' as const,
-  top: 0,
-  left: 0,
-  right: 0,
-  bottom: 0,
-};
-
-function Corner({ pos, color }: { pos: 'tl' | 'tr' | 'bl' | 'br'; color: string }) {
-  const base = {
-    position: 'absolute' as const,
-    width: CORNER,
-    height: CORNER,
-    borderColor: color,
-  };
-  const map = {
-    tl: { top: 0, left: 0, borderTopWidth: 3, borderLeftWidth: 3, borderTopLeftRadius: 10 },
-    tr: { top: 0, right: 0, borderTopWidth: 3, borderRightWidth: 3, borderTopRightRadius: 10 },
-    bl: { bottom: 0, left: 0, borderBottomWidth: 3, borderLeftWidth: 3, borderBottomLeftRadius: 10 },
-    br: { bottom: 0, right: 0, borderBottomWidth: 3, borderRightWidth: 3, borderBottomRightRadius: 10 },
-  };
-  return <View style={{ ...base, ...map[pos] }} />;
-}
+const styles = StyleSheet.create({
+  heading: { padding: space.xl, gap: 8 },
+  title: { color: colors.text, fontFamily: fonts.bold, fontSize: 25, textAlign: 'center' },
+  description: { color: colors.textSoft, fontFamily: fonts.regular, fontSize: 14, lineHeight: 21, textAlign: 'center' },
+  permissionBody: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 28, gap: 16 },
+  cameraBody: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 24 },
+  reticle: { width: 240, height: 240, borderWidth: 3, borderRadius: 22, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
+  scanHint: { color: colors.text, fontFamily: fonts.medium, fontSize: 13, backgroundColor: 'rgba(10,13,19,0.75)', padding: 12, borderRadius: radius.pill },
+  error: { color: colors.danger, fontFamily: fonts.medium, fontSize: 13, lineHeight: 20, padding: 16, borderRadius: radius.md, backgroundColor: colors.bgDeep },
+  footer: { padding: space.lg, paddingBottom: space.xl, gap: 10 },
+});

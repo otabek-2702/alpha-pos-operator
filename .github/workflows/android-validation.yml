@@ -1,0 +1,121 @@
+name: Validate prebuilt Android candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: Numeric ID of the draft release in this repository
+        required: true
+        type: string
+      app_sha256:
+        description: SHA256 of operator-ci-x86_64.apk
+        required: true
+        type: string
+      test_sha256:
+        description: SHA256 of operator-ci-androidTest.apk
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: android-candidate-${{ inputs.release_id }}
+  cancel-in-progress: false
+
+jobs:
+  instrumentation:
+    # Standard public-repository runners are free. Do not use this on a private fork.
+    if: github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      # GitHub requires push access to see draft releases. This job only downloads.
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Download and verify the two draft candidate APKs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          APP_SHA256: ${{ inputs.app_sha256 }}
+          TEST_SHA256: ${{ inputs.test_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_ID" =~ ^[0-9]+$ ]]
+          [[ "$APP_SHA256" =~ ^[[:xdigit:]]{64}$ ]]
+          [[ "$TEST_SHA256" =~ ^[[:xdigit:]]{64}$ ]]
+          mkdir -p ci
+          gh api "repos/$GH_REPO/releases/$RELEASE_ID" > ci/release.json
+          jq -e '.draft == true' ci/release.json > /dev/null
+          for name in operator-ci-x86_64.apk operator-ci-androidTest.apk; do
+            id=$(jq -er --arg name "$name" '[.assets[] | select(.name == $name and .state == "uploaded")] | if length == 1 then .[0].id else error("Expected exactly one uploaded candidate asset") end' ci/release.json)
+            gh api -H 'Accept: application/octet-stream' "repos/$GH_REPO/releases/assets/$id" > "ci/$name"
+          done
+          printf '%s  %s\n' "${APP_SHA256,,}" ci/operator-ci-x86_64.apk "${TEST_SHA256,,}" ci/operator-ci-androidTest.apk > ci/SHA256SUMS
+          sha256sum --check ci/SHA256SUMS
+          # Reject an ARM-only APK before spending time booting the emulator.
+          unzip -Z1 ci/operator-ci-x86_64.apk > ci/apk-files.txt
+          grep -q '^lib/x86_64/' ci/apk-files.txt
+          printf 'Candidate release ID: `%s`\n\n' "$RELEASE_ID" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Verified APK SHA256 hashes:\n\n```text\n' >> "$GITHUB_STEP_SUMMARY"
+          cat ci/SHA256SUMS >> "$GITHUB_STEP_SUMMARY"
+          printf '```\n' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Prepare isolated instrumentation command
+        run: |
+          set -euo pipefail
+          cat > ci/run-instrumentation.sh <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          device=emulator-5554
+          trap 'adb -s "$device" logcat -d -s AndroidRuntime:E > ci/android-crashes.txt 2>&1 || true' EXIT
+          adb -s "$device" install -r -g ci/operator-ci-x86_64.apk
+          adb -s "$device" install -r -g ci/operator-ci-androidTest.apk
+          adb -s "$device" logcat -c
+          timeout 240s adb -s "$device" shell am instrument -w -r -e mode test com.alphapos.operatorlink.test/com.alphapos.operatorlink.OperatorRuntimeInstrumentation | tee ci/instrumentation.txt
+          # am instrument itself can exit zero even when this custom runner fails.
+          tr -d '\r' < ci/instrumentation.txt > ci/instrumentation-normalized.txt
+          grep -q 'PASS: answer timing;' ci/instrumentation-normalized.txt
+          grep -q '^INSTRUMENTATION_CODE: -1$' ci/instrumentation-normalized.txt
+          if grep -Eq 'FAIL:|INSTRUMENTATION_FAILED|INSTRUMENTATION_ABORTED' ci/instrumentation-normalized.txt; then
+            exit 1
+          fi
+          SCRIPT
+          bash -n ci/run-instrumentation.sh
+
+      - name: Enable Android hardware acceleration
+        run: |
+          printf '%s\n' 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          test -r /dev/kvm && test -w /dev/kvm
+
+      - name: Run synthetic Android 35 regression suite
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          cores: 2
+          ram-size: 2048M
+          emulator-boot-timeout: 420
+          disable-linux-hw-accel: false
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
+          script: bash ci/run-instrumentation.sh
+
+      - name: Report instrumentation results
+        if: always()
+        run: |
+          for file in ci/instrumentation.txt ci/android-crashes.txt; do
+            if [[ -s "$file" ]]; then
+              printf '\n%s\n\n```text\n' "$file" >> "$GITHUB_STEP_SUMMARY"
+              head -c 24000 "$file" >> "$GITHUB_STEP_SUMMARY"
+              printf '\n```\n' >> "$GITHUB_STEP_SUMMARY"
+              cat "$file"
+            fi
+          done
+          # No APK, test data, AVD cache, or log artifact is retained by this job.

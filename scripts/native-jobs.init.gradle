@@ -1,0 +1,13 @@
+// Gradle's --max-workers does not constrain Ninja. Keep native compile/link jobs
+// in one CMake/Ninja pool so APK builds remain usable on an 8 GB workstation.
+allprojects { project ->
+    project.afterEvaluate {
+        if (project.plugins.hasPlugin('com.android.application') || project.plugins.hasPlugin('com.android.library')) {
+            project.android.defaultConfig.externalNativeBuild.cmake.arguments.addAll([
+                '-DCMAKE_JOB_POOLS=operator_native=1',
+                '-DCMAKE_JOB_POOL_COMPILE=operator_native',
+                '-DCMAKE_JOB_POOL_LINK=operator_native'
+            ])
+        }
+    }
+}

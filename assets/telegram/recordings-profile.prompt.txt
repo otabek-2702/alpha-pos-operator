@@ -1,0 +1,5 @@
+Tool: built-in image_gen.imagegen (edit mode)
+Edit target: assets/telegram/call-center-source.jpg
+Selected output: assets/telegram/recordings-profile.png
+
+Edit this exact existing 640×640 Smart Food profile image. This is a precise-object-edit, not a recreation. Copy the supplied source image exactly, including its solid flat orange background, original crown/SF logo, lettering SMART FOOD, slogan, decorative lines, and their existing positions and sizes. Do not redraw, clean up, resize, retouch, straighten, recolor, or sharpen the brand artwork. Keep the entire region above y=450 unchanged. The ONLY requested addition is a small white circular voice-recording badge in the empty orange area below the original logo, centered at (320,535), radius50. Within that circle draw a simple flat orange microphone and two small sound waves. All badge artwork stays within x270–370 and y485–585. Do not add any text, shadows, gradients, texture, frame or other decoration. Keep the original 640×640 square composition. Brand artwork must be unchanged, and badge must be separated from the logo with the original empty orange gap.
