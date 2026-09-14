@@ -5,10 +5,12 @@ finishes; a compiled APK is not proof of Samsung-specific call recording access.
 
 ## Automated checks
 
-- JavaScript/TypeScript: typecheck passed; eight pairing and configuration tests
+- JavaScript/TypeScript: typecheck passed; nine pairing and configuration tests
   passed (multiple targets, rescanning, old URL migration, invalid QR rejection,
   WSS/IPv6, keeping bot secrets out of persisted JS view models, and private
-  Telegram QR provisioning with separate groups).
+  Telegram QR provisioning with separate groups, and incomplete native Telegram
+  settings before setup). Controlled startup/read-failure checks also confirmed
+  zero writes after a failed read and preservation of both POS entries after retry.
 - Native recording policy: 17 JVM checks passed against production Kotlin code.
 - APK signing: the local 2.0 test build and the previous local 1.0.0 APK use the
   same certificate. The previous APK is retained as `dist/operator-1.0.0.apk`.
@@ -16,11 +18,16 @@ finishes; a compiled APK is not proof of Samsung-specific call recording access.
 - Telegram setup API: separate report messages and a synthetic silent WAV
   document upload were confirmed. These checks verify bot/group access;
   they do not validate the Android app's recording pipeline.
-- Android instrumentation and emulator UI/service checks: pending independent
-  CI execution. Planned checks cover real SQLite
+- Android instrumentation passed on an independent Android 35 emulator:
+  [validation run](https://github.com/otabek-2702/alpha-pos-operator/actions/runs/34896015393).
+  Both candidate APK hashes were verified, both APKs installed successfully, and
+  the custom runner returned its PASS result and instrumentation code -1.
+  The executable checks cover real SQLite
   baseline/outbox persistence, Keystore encryption, uptime intervals, answer
   timing, call duration, missed/waiting calls, callback attempts vs connections,
-  customer names, independent POS ACKs and restart recovery.
+  customer names, independent POS ACKs and restart recovery. Emulator UI and
+  foreground-service lifecycle checks are being rerun on Android 13 and 15 after
+  fixing a configuration-read failure found by the first UI run.
   The local API 35 emulator failed or stalled during Android startup and app
   installation under host memory pressure. A low-RAM configuration did not
   make it suitable for the required checks, so an independent CI emulator is
@@ -30,13 +37,20 @@ finishes; a compiled APK is not proof of Samsung-specific call recording access.
 - Desktop: full lint/typecheck passed; 207 tests passed, four existing SQLite
   cases skipped by the desktop test environment. Real WebSocket and UDP tests
   cover permanent pairing, saved mode, discovery, durable call records and ACKs.
-- Desktop 0.0.16 packaging passed. The user approved including the existing
+- [Desktop 0.0.16 is published](https://github.com/otabek-2702/smart-pos-releases/releases/tag/v0.0.16).
+  The downloaded public installer matches GitHub SHA256 and the updater's SHA512.
+  The user approved including the existing
   kitchen-display changes. The full release source is committed as
   `2f8d7313c68ebb79df8f283c29028f4246dfd98d`; an isolated Operator-only branch
   remains as a backup. Installer/source hashes are recorded in the desktop
   release manifest.
 
 ## Physical Samsung check
+
+The user confirmed **Samsung SM-A037F/DS, Android 13, one active SIM**. The
+deployment serves **one Smart Food branch**, with one shared bot for the separate
+recording and report groups. Multiple POS machines belong to this same branch.
+These confirmed setup details are not evidence of a completed device test.
 
 Follow the [Uzbek installation guide](operator-2-install-uz.md) before testing.
 

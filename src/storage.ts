@@ -1,12 +1,8 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 /**
- * Persistence for the paired desktop POS WebSocket URL.
- *
- * Only one desktop is paired at a time. The stored value is the full URL
- * encoded in the pairing QR, e.g. `ws://192.168.1.42:8765?token=abc123`.
- * It is stored verbatim and reused on launch so the app auto-reconnects
- * without re-scanning.
+ * Legacy single-POS storage, retained to migrate an existing installation.
+ * New connections are kept in the encrypted native multi-POS configuration.
  */
 
 const DESKTOP_URL_KEY = 'alphapos.operatorlink.desktopUrl';

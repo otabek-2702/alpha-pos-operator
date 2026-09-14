@@ -27,6 +27,11 @@ jobs:
     # Standard public-repository runners are free. Do not use this on a private fork.
     if: github.event.repository.private == false
     runs-on: ubuntu-24.04
+    name: Android API ${{ matrix.api }}
+    strategy:
+      fail-fast: false
+      matrix:
+        api: [33, 35]
     timeout-minutes: 25
     permissions:
       # GitHub requires push access to see draft releases. This job only downloads.
@@ -105,10 +110,10 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           test -r /dev/kvm && test -w /dev/kvm
 
-      - name: Run synthetic Android 35 regression suite
+      - name: Run synthetic Android regression and UI suite
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         with:
-          api-level: 35
+          api-level: ${{ matrix.api }}
           target: google_apis
           arch: x86_64
           cores: 2
@@ -134,7 +139,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: operator-emulator-evidence
+          name: operator-emulator-evidence-api-${{ matrix.api }}
           path: ci/e2e/
           retention-days: 7
           if-no-files-found: ignore

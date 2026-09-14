@@ -70,6 +70,15 @@ test('view-model configuration retains independent groups and strips the bot tok
   assert.ok(!('botToken' in saved));
 });
 
+test('native POS-only configuration loads when Telegram has not been configured', () => {
+  for (const partial of [{}, { enabled: false, sendCallStats: false }]) {
+    assert.deepEqual(safeTelegramSettings(partial), {
+      enabled: false, chatId: '', folderUri: '', folderName: '',
+      sendMissedCalls: false, statsChatId: '', sendCallStats: false,
+    });
+  }
+});
+
 test('private Telegram setup QR imports separate destinations without enabling audio prematurely', () => {
   const setup = parseTelegramSetupCode(JSON.stringify({ type: 'smart_pos_telegram', version: 1,
     botToken: '12345:abcdefghijklmnopqrstuvwx', chatId: '-100111', statsChatId: '-100222' }));

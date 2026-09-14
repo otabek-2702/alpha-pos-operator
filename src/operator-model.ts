@@ -125,14 +125,14 @@ export function upsertPos(targets: SavedPos[], next: SavedPos): SavedPos[] {
   return targets.map((target, i) => i === index ? next : target);
 }
 
-export function safeTelegramSettings(settings: TelegramSettings): TelegramSettings {
+export function safeTelegramSettings(settings: Partial<TelegramSettings>): TelegramSettings {
   return {
     enabled: settings.enabled === true,
-    chatId: settings.chatId.trim(),
-    folderUri: settings.folderUri,
-    folderName: settings.folderName,
+    chatId: typeof settings.chatId === 'string' ? settings.chatId.trim() : '',
+    folderUri: typeof settings.folderUri === 'string' ? settings.folderUri : '',
+    folderName: typeof settings.folderName === 'string' ? settings.folderName : '',
     sendMissedCalls: false,
-    statsChatId: (settings.statsChatId ?? '').trim(),
+    statsChatId: typeof settings.statsChatId === 'string' ? settings.statsChatId.trim() : '',
     sendCallStats: settings.sendCallStats === true,
   };
 }

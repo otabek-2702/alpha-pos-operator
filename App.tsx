@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, AppState, BackHandler, StatusBar, Text, View } from 'react-native';
+import { Alert, AppState, BackHandler, ScrollView, StatusBar, Text, View } from 'react-native';
 import {
   HankenGrotesk_400Regular, HankenGrotesk_500Medium,
   HankenGrotesk_600SemiBold, HankenGrotesk_700Bold,
@@ -10,6 +10,7 @@ import {
 } from '@expo-google-fonts/jetbrains-mono';
 import { useAppUpdates } from './src/hooks/useAppUpdates';
 import { I18nProvider } from './src/i18n';
+import { Button, Screen } from './src/components/ui';
 import { PairScreen } from './src/screens/PairScreen';
 import { PermissionsScreen } from './src/screens/PermissionsScreen';
 import { SplashScreen } from './src/screens/SplashScreen';
@@ -27,6 +28,7 @@ import {
 import { colors, fonts } from './src/theme';
 
 type Page = 'home' | 'pair' | 'telegram-scan' | 'permissions' | 'telegram' | 'history' | 'support';
+const CONFIG_LOAD_ERROR = 'Saqlangan POS va Telegram sozlamalarini o‘qib bo‘lmadi. “Qayta yuklash” tugmasini bosing. Muammo davom etsa, ilovani qayta oching yoki yangi APKni o‘rnating.';
 
 export default function App() {
   return <I18nProvider><Root /></I18nProvider>;
@@ -44,6 +46,12 @@ function Root() {
   const [perms, setPerms] = useState<PermissionState | null>(null);
   const [config, setConfig] = useState<OperatorConfiguration>({ targets: [], telegram: EMPTY_TELEGRAM });
   const configRef = useRef(config);
+  const [configLoaded, setConfigLoaded] = useState(false);
+  const configLoadedRef = useRef(false);
+  const [configLoadError, setConfigLoadError] = useState('');
+  const [loadingConfig, setLoadingConfig] = useState(false);
+  const loadingConfigRef = useRef(false);
+  const mounted = useRef(true);
   const [snapshot, setSnapshot] = useState<RuntimeSnapshot | null>(null);
   const [runtimeError, setRuntimeError] = useState('');
   const [testing, setTesting] = useState(false);
@@ -59,47 +67,86 @@ function Root() {
     }
   }, []);
 
+  const markConfigUnavailable = useCallback(() => {
+    configLoadedRef.current = false;
+    if (mounted.current) {
+      setConfigLoaded(false);
+      setConfigLoadError(CONFIG_LOAD_ERROR);
+    }
+  }, []);
+
+  const loadConfiguration = useCallback(async () => {
+    if (loadingConfigRef.current) return;
+    loadingConfigRef.current = true;
+    configLoadedRef.current = false;
+    setLoadingConfig(true);
+    setConfigLoaded(false);
+    // A retry after a failed readback must wait for the existing save queue.
+    // Pending saves check configLoadedRef again before making any native write.
+    try {
+      await mutation.current.catch(() => {});
+      if (!mounted.current) return;
+      let saved = await getOperatorConfiguration();
+      if (!mounted.current) return;
+      const legacy = await loadDesktopUrl();
+      if (!mounted.current) return;
+      if (legacy && saved.targets.length === 0) {
+        try {
+          const migrated = { ...saved, targets: [parsePairingCode(legacy)] };
+          await configureOperator(migrated);
+          saved = migrated;
+          await clearDesktopUrl();
+        } catch {
+          // Starting the service can fail after the migrated config was saved.
+          // Read it back before allowing a later startup write; keep the legacy key.
+          saved = await getOperatorConfiguration();
+        }
+      } else if (legacy && saved.targets.length > 0) {
+        await clearDesktopUrl();
+      }
+      if (!mounted.current) return;
+      configRef.current = saved;
+      configLoadedRef.current = true;
+      setConfig(saved);
+      setConfigLoaded(true);
+      setConfigLoadError('');
+    } catch {
+      markConfigUnavailable();
+    } finally {
+      loadingConfigRef.current = false;
+      if (mounted.current) setLoadingConfig(false);
+    }
+  }, [markConfigUnavailable]);
+
   useEffect(() => {
-    let disposed = false;
-    (async () => {
-      const currentPermissions = await checkPermissions();
-      if (disposed) return;
+    mounted.current = true;
+    const permissions = checkPermissions().then((currentPermissions) => {
+      if (!mounted.current) return;
       setPerms(currentPermissions);
       if (!hasRequiredPermissions(currentPermissions)) setPage('permissions');
-      try {
-        let saved = await getOperatorConfiguration();
-        const legacy = await loadDesktopUrl();
-        if (legacy && saved.targets.length === 0) {
-          try {
-            const migrated = { ...saved, targets: [parsePairingCode(legacy)] };
-            await configureOperator(migrated);
-            saved = migrated;
-            await clearDesktopUrl();
-          } catch {
-            // Keep the legacy key until migration has actually been saved.
-          }
-        } else if (legacy && saved.targets.length > 0) {
-          await clearDesktopUrl();
-        }
-        if (disposed) return;
-        configRef.current = saved;
-        setConfig(saved);
-      } catch {
-        if (!disposed) setRuntimeError('Operator xizmatini yuklab bo‘lmadi. Yangi Android APKni o‘rnating.');
-      } finally {
-        if (!disposed) setReady(true);
-      }
-    })();
-    return () => { disposed = true; };
-  }, []);
+    }).catch(() => {
+      if (mounted.current) setRuntimeError('Ruxsatlarni tekshirib bo‘lmadi. Ilovani qayta oching.');
+    });
+    void Promise.all([permissions, loadConfiguration()]).finally(() => {
+      if (mounted.current) setReady(true);
+    });
+    return () => { mounted.current = false; };
+  }, [loadConfiguration]);
 
   const corePermissions = !!(perms?.phone && perms?.callLog);
   useEffect(() => {
-    if (!ready || !corePermissions) return;
-    configureOperator(configRef.current)
-      .then(refresh)
+    if (!ready || !corePermissions || !configLoaded) return;
+    let cancelled = false;
+    const operation = mutation.current.catch(() => {}).then(async () => {
+      if (cancelled || !configLoadedRef.current || loadingConfigRef.current) return;
+      await configureOperator(configRef.current);
+      await refresh();
+    });
+    mutation.current = operation;
+    void operation
       .catch(() => setRuntimeError('Xizmat ishga tushmadi. Ruxsatlarni tekshirib, ilovani qayta oching.'));
-  }, [ready, corePermissions, refresh]);
+    return () => { cancelled = true; };
+  }, [ready, corePermissions, configLoaded, refresh]);
 
   useEffect(() => {
     if (!ready) return;
@@ -126,9 +173,18 @@ function Root() {
   }, [page]);
 
   const save = (change: (previous: OperatorConfiguration) => OperatorConfiguration): Promise<void> => {
+    if (!configLoadedRef.current || loadingConfigRef.current) return Promise.reject(new Error(CONFIG_LOAD_ERROR));
     const operation = mutation.current.catch(() => {}).then(async () => {
+      if (!configLoadedRef.current || loadingConfigRef.current) throw new Error(CONFIG_LOAD_ERROR);
       await configureOperator(change(configRef.current));
-      const saved = await getOperatorConfiguration();
+      let saved: OperatorConfiguration;
+      try {
+        saved = await getOperatorConfiguration();
+      } catch (error) {
+        // The write may have succeeded; block later writes based on a stale view.
+        markConfigUnavailable();
+        throw error;
+      }
       configRef.current = saved;
       setConfig(saved);
       await refresh();
@@ -180,6 +236,16 @@ function Root() {
   let content: React.ReactNode;
   if ((!fontsLoaded && !fontError) || !ready) {
     content = <SplashScreen />;
+  } else if (!configLoaded) {
+    content = <Screen>
+      <ScrollView contentContainerStyle={{ flexGrow: 1, justifyContent: 'center', padding: 24, gap: 20 }}>
+        <Text accessibilityRole="header" style={{ color: colors.text, fontFamily: fonts.bold, fontSize: 26 }}>Sozlamalar yuklanmadi</Text>
+        <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={{ color: colors.textSoft, fontFamily: fonts.medium, fontSize: 16, lineHeight: 24 }}>
+          {configLoadError || CONFIG_LOAD_ERROR}
+        </Text>
+        <Button label="Qayta yuklash" onPress={() => void loadConfiguration()} loading={loadingConfig} disabled={loadingConfig} />
+      </ScrollView>
+    </Screen>;
   } else if (page === 'pair') {
     content = <PairScreen onPaired={handlePaired} onClose={() => setPage('home')} />;
   } else if (page === 'telegram-scan') {
@@ -206,7 +272,7 @@ function Root() {
   return <View style={{ flex: 1, backgroundColor: colors.bg }}>
     <StatusBar barStyle="light-content" backgroundColor="transparent" translucent />
     {content}
-    {runtimeError && ready && page === 'home' ? <Text accessibilityRole="alert" style={{
+    {runtimeError && ready && configLoaded && page === 'home' ? <Text accessibilityRole="alert" style={{
       color: colors.danger, padding: 12, fontFamily: fonts.medium, fontSize: 13,
     }}>{runtimeError}</Text> : null}
   </View>;
