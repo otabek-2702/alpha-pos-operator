@@ -49,12 +49,19 @@ def snapshot(name):
     ET.ElementTree(ui()).write(OUT / f"{name}.xml", encoding="utf-8")
 
 
-def find(label, tree=None):
+def find(label, tree=None, include_disabled=False):
     tree = tree if tree is not None else ui()
+    parents = {child: parent for parent in tree.iter() for child in parent}
+    def enabled(node):
+        while node is not None:
+            if node.get("enabled") == "false":
+                return False
+            node = parents.get(node)
+        return True
     candidates = []
     for node in tree.iter("node"):
         values = [node.get("text", ""), node.get("content-desc", ""), node.get("resource-id", "")]
-        if any(label.casefold() in value.casefold() for value in values) and node.get("enabled") != "false":
+        if any(label.casefold() in value.casefold() for value in values) and (include_disabled or enabled(node)):
             bounds = list(map(int, re.findall(r"\d+", node.get("bounds", ""))))
             if len(bounds) == 4 and bounds[2] > bounds[0] and bounds[3] > bounds[1]:
                 candidates.append((not any(label.casefold() == value.casefold() for value in values), bounds))
@@ -192,11 +199,12 @@ try:
                 tap(label)
                 allowed = True
                 break
-        if not allowed and find("Tayyor", tree):
+        if not allowed and runtime_permissions_granted() and find("Tayyor", tree):
             break
         time.sleep(1)
-    tap("Tayyor")
     assert runtime_permissions_granted(), "Onboarding did not grant all four requested runtime permissions"
+    assert find("Tayyor"), "The onboarding completion button is still disabled"
+    tap("Tayyor")
     wait_for(lambda: both_since(0, lambda e: e.get("event") == "connected"), "two POS connections")
     wait_for(lambda: find("Ishlayapti"), "actual working status")
     snapshot("02-two-pos-home")
@@ -266,7 +274,8 @@ try:
         tap("Allow")
     wait_for(lambda: find("OperatorTest"), "selected recording folder")
     tap("Sozlamalarni saqlash")
-    wait_for(lambda: find("Saqlandi"), "folder configuration saved in the fixed footer")
+    # Saving deliberately disables this footer button, but its text is still evidence.
+    wait_for(lambda: find("Saqlandi", include_disabled=True), "folder configuration saved in the fixed footer")
     snapshot("05-telegram-folder")
     # Recreate the application, proving that the folder is saved outside React state.
     adb("shell", "am", "force-stop", APP)
@@ -307,6 +316,10 @@ try:
     assert state["history"]["callCount"] >= 2, "Completed calls did not persist"
     stage("PASS: durable calls, saved target deletion and service uptime periods")
 except BaseException:
+    try:
+        (OUT / "failure-package-permissions.txt").write_text(adb("shell", "dumpsys", "package", APP), encoding="utf-8")
+    except BaseException:
+        pass
     try:
         snapshot("failure")
     except BaseException:
