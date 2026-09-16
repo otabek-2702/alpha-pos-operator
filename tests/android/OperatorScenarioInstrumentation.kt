@@ -8,7 +8,7 @@ import java.util.UUID
 
 /** Emulator-only setup/inspection for testing the production app's UI and service lifecycle. */
 object OperatorScenario {
-  fun run(targetContext: Context, mode: String): JSONObject {
+  fun run(targetContext: Context, mode: String, source: String? = null): JSONObject {
       check(android.os.Build.FINGERPRINT.contains("generic") || android.os.Build.MODEL.contains("sdk")) { "Emulator required" }
       if (mode == "setup") {
         val targets = JSONArray()
@@ -26,7 +26,12 @@ object OperatorScenario {
         val configuration = OperatorRuntimeStore.config(targetContext).put("telegram", telegram)
         OperatorRuntimeStore.saveConfig(targetContext, configuration)
       }
+      if (mode == "update-source") {
+        // Serve self-updates from the emulator host; "none" restores the production source.
+        OperatorUpdater.setTestSource(targetContext, source?.takeIf { it != "none" })
+      }
       val state = OperatorRuntimeStore.state(targetContext)
+      state.put("update", OperatorUpdater.status(targetContext))
       state.put("targetCount", OperatorRuntimeStore.config(targetContext).optJSONArray("targets")?.length() ?: 0)
       // The instrumentation process may recreate the application; persisted state is reported too.
       state.put("serviceInThisProcess", CallBridgeForegroundService.instance != null)

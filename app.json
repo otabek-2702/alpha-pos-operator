@@ -3,7 +3,7 @@
     "name": "Operator",
     "slug": "alphapos-operator-link",
     "scheme": "alphaposlink",
-    "version": "2.0.0",
+    "version": "2.1.0",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "icon": "./assets/icon.png",
@@ -13,8 +13,8 @@
     },
     "updates": {
       "url": "https://u.expo.dev/d596eb89-da57-4d61-91c9-4e49b70ca387",
-      "enabled": true,
-      "checkAutomatically": "ON_LOAD",
+      "enabled": false,
+      "checkAutomatically": "NEVER",
       "fallbackToCacheTimeout": 0
     },
     "assetBundlePatterns": [
@@ -22,7 +22,7 @@
     ],
     "android": {
       "package": "com.alphapos.operatorlink",
-      "versionCode": 2,
+      "versionCode": 20100,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-foreground.png",
         "backgroundImage": "./assets/adaptive-background.png",

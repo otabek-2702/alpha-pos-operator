@@ -9,6 +9,8 @@ const PERMISSIONS = [
   'RECEIVE_BOOT_COMPLETED', 'READ_PHONE_STATE', 'READ_CALL_LOG', 'INTERNET',
   'ACCESS_NETWORK_STATE', 'ACCESS_WIFI_STATE', 'WAKE_LOCK',
   'REQUEST_IGNORE_BATTERY_OPTIMIZATIONS', 'MANAGE_EXTERNAL_STORAGE',
+  // Self-update from GitHub releases; Android 12+ installs our own update without a prompt.
+  'REQUEST_INSTALL_PACKAGES', 'UPDATE_PACKAGES_WITHOUT_USER_ACTION',
 ];
 
 module.exports = function withCallForegroundService(config) {
@@ -41,7 +43,8 @@ module.exports = function withCallForegroundService(config) {
       $: { 'android:name': '.CallBridgeForegroundService', 'android:enabled': 'true', 'android:exported': 'false', 'android:stopWithTask': 'false', 'android:foregroundServiceType': 'specialUse' },
       property: [{ $: { 'android:name': 'android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE', 'android:value': 'User-enabled dedicated operator phone: continuously detect telephone calls, immediately relay caller events to paired local POS terminals, and deliver new phone-created call recordings to the configured private Telegram group.' } }],
     });
-    app.receiver = (app.receiver || []).filter(r => r.$?.['android:name'] !== '.OperatorBootReceiver');
+    app.receiver = (app.receiver || []).filter(r => !['.OperatorBootReceiver', '.OperatorUpdateReceiver'].includes(r.$?.['android:name']));
+    app.receiver.push({ $: { 'android:name': '.OperatorUpdateReceiver', 'android:enabled': 'true', 'android:exported': 'false' } });
     app.receiver.push({
       $: { 'android:name': '.OperatorBootReceiver', 'android:enabled': 'true', 'android:exported': 'false' },
       'intent-filter': [{ action: [

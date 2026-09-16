@@ -6,7 +6,6 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
-import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
@@ -22,7 +21,10 @@ import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.uimanager.ViewManager
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
+import java.io.IOException
 import java.net.URI
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.Executors
 
@@ -81,6 +83,11 @@ class OperatorRuntimeModule(private val context: ReactApplicationContext) : Reac
         for (field in listOf("chatId", "statsChatId")) {
           if (telegram.has(field)) telegram.put(field, telegram.optString(field).trim())
           if (telegram.optString(field).isNotEmpty()) require(Regex("-?[0-9]+|@[A-Za-z0-9_]{5,}").matches(telegram.getString(field))) { "Telegram guruh ID si noto'g'ri" }
+        }
+        val folderUri = telegram.optString("folderUri")
+        if (folderUri.isNotEmpty()) {
+          if (Uri.parse(folderUri).scheme == "file") telegram.put("folderUri", Uri.fromFile(OperatorRecordings.localFolder(folderUri)).toString())
+          else require(Uri.parse(folderUri).scheme == "content") { "Ovoz yozuvlari papkasini qayta tanlang" }
         }
         val recordings = OperatorRecordings(context)
         try {
@@ -163,6 +170,7 @@ class OperatorRuntimeModule(private val context: ReactApplicationContext) : Reac
             state.put("telegram", telegram)
           } finally { recordings.close() }
           state.remove("telegramError"); state.remove("telegramBlocked")
+          state.put("update", OperatorUpdater.status(context))
           promise.resolve(state.toString())
         } catch (_: Exception) { promise.reject("SNAPSHOT", "Xizmat holati o'qilmadi") }
       }
@@ -179,9 +187,28 @@ class OperatorRuntimeModule(private val context: ReactApplicationContext) : Reac
   private fun phonePermissions() = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED && ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CALL_LOG) == PackageManager.PERMISSION_GRANTED
 
   @ReactMethod fun checkAccess(promise: Promise) {
-    val allFiles = if (Build.VERSION.SDK_INT >= 30) Environment.isExternalStorageManager() else ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+    val allFiles = OperatorRecordings.hasAllFilesAccess(context)
+    val installs = OperatorUpdater.canInstallPackages(context)
     val battery = (context.getSystemService(android.content.Context.POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(context.packageName)
-    promise.resolve(JSONObject().put("allFiles", allFiles).put("battery", battery).toString())
+    promise.resolve(JSONObject().put("allFiles", allFiles).put("battery", battery).put("installs", installs).toString())
+  }
+
+  /** Checks GitHub now; also retries an install that is waiting for the user (the app is on screen). */
+  @ReactMethod fun checkForUpdate(promise: Promise) {
+    OperatorUpdater.requestCheck(context)
+    val service = CallBridgeForegroundService.instance
+    if (service != null) service.checkUpdateNow()
+    else work.execute {
+      try { OperatorUpdater(context).tick(false, 0L, OperatorRuntimeStore.config(context).optJSONObject("telegram") ?: JSONObject()) { true } }
+      catch (_: Exception) { }
+    }
+    promise.resolve(null)
+  }
+
+  @ReactMethod fun openInstallSettings(promise: Promise) {
+    if (Build.VERSION.SDK_INT < 26) { promise.resolve(null); return }
+    openSettings(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}")), promise,
+      Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}")))
   }
 
   private fun openSettings(intent: Intent, promise: Promise, fallback: Intent? = null) {
@@ -204,9 +231,90 @@ class OperatorRuntimeModule(private val context: ReactApplicationContext) : Reac
 
   @ReactMethod fun openBatterySettings(promise: Promise) = openSettings(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS), promise, Intent(Settings.ACTION_SETTINGS))
 
+  private val knownRecordingFolders = listOf(
+    "Recordings/Call", "Call", "Recordings/Call recordings", "Recordings/Call Recordings", "Sounds/Call recordings",
+    "Music/Call Recordings", "Call Recordings", "CallRecordings", "Record/Call", "MIUI/sound_recorder/call_rec",
+  )
+
+  /** Audio count and newest recording time; bounded so a huge folder cannot stall the worker. */
+  private fun describeFolder(root: File, folder: File, depth: Int): JSONObject {
+    var count = 0
+    var latest = 0L
+    var visited = 0
+    fun walk(directory: File, level: Int) {
+      val children = directory.listFiles() ?: return
+      for (child in children) {
+        if (++visited > 20_000) return
+        if (child.isDirectory) { if (level < depth && !child.name.startsWith(".")) walk(child, level + 1) }
+        else if (OperatorRecordings.isAudio(child.name)) { count++; latest = maxOf(latest, child.lastModified()) }
+      }
+    }
+    if (depth >= 0) walk(folder, 0)
+    return JSONObject().put("uri", Uri.fromFile(folder).toString()).put("path", folder.path)
+      .put("name", folder.path.removePrefix(root.path).trimStart('/')).put("audioCount", count)
+      .put("latestAudioAt", latest).put("truncated", visited > 20_000)
+  }
+
+  /** Known phone-recorder folders first, then a shallow search for folders named like call recordings. */
+  @ReactMethod fun findRecordingFolders(promise: Promise) {
+    work.execute {
+      try {
+        if (!OperatorRecordings.hasAllFilesAccess(context)) {
+          promise.resolve(JSONObject().put("access", false).put("folders", JSONArray()).toString())
+          return@execute
+        }
+        val root = OperatorRecordings.storageRoot()
+        val found = LinkedHashMap<String, File>()
+        for (relative in knownRecordingFolders) File(root, relative).takeIf { it.isDirectory }?.canonicalFile?.let { found.putIfAbsent(it.path, it) }
+        val queue = ArrayDeque<Pair<File, Int>>().apply { add(root to 0) }
+        var visited = 0
+        while (queue.isNotEmpty() && visited < 5_000) {
+          val (directory, depth) = queue.removeFirst()
+          val children = directory.listFiles() ?: continue
+          for (child in children) {
+            if (!child.isDirectory || child.name.startsWith(".") || (depth == 0 && child.name == "Android")) continue
+            visited++
+            if (child.name.contains("call", ignoreCase = true)) child.canonicalFile.let { found.putIfAbsent(it.path, it) }
+            if (depth < 3) queue.addLast(child to depth + 1)
+          }
+        }
+        val folders = found.values.filter { it.path.startsWith(root.path + File.separator) }.map { describeFolder(root, it, 3) }
+          .sortedWith(compareByDescending<JSONObject> { it.getInt("audioCount") > 0 }.thenByDescending { it.getLong("latestAudioAt") })
+        promise.resolve(JSONObject().put("access", true).put("folders", JSONArray(folders.take(10))).toString())
+      } catch (_: Exception) { promise.reject("FIND_FOLDERS", "Yozuvlar papkasini qidirib bo'lmadi") }
+    }
+  }
+
+  /** Read-only folder listing confined to shared storage, for the in-app folder browser. */
+  @ReactMethod fun listFolders(path: String?, promise: Promise) {
+    work.execute {
+      try {
+        if (!OperatorRecordings.hasAllFilesAccess(context)) {
+          promise.resolve(JSONObject().put("access", false).toString())
+          return@execute
+        }
+        val root = OperatorRecordings.storageRoot()
+        val folder = if (path.isNullOrBlank()) root else File(path).canonicalFile
+        val isRoot = folder.path == root.path
+        require(isRoot || folder.path.startsWith(root.path + File.separator)) { "Papka telefon xotirasida bo'lishi kerak" }
+        require(folder.isDirectory) { "Papka topilmadi" }
+        val children = (folder.listFiles() ?: throw IOException("unreadable folder"))
+          .filter { it.isDirectory && !it.name.startsWith(".") && !(isRoot && it.name == "Android") }
+          .sortedBy { it.name.lowercase(Locale.ROOT) }.take(500)
+        val result = describeFolder(root, folder, if (isRoot) -1 else 2).put("access", true).put("isRoot", isRoot)
+          .put("parent", if (isRoot) JSONObject.NULL else folder.parentFile?.path ?: JSONObject.NULL)
+          .put("folders", JSONArray(children.map { JSONObject().put("path", it.path).put("name", it.name) }))
+        promise.resolve(result.toString())
+      } catch (error: IllegalArgumentException) { promise.reject("LIST_FOLDERS", error.message ?: "Papkani ochib bo'lmadi") }
+      catch (_: Exception) { promise.reject("LIST_FOLDERS", "Papkani ochib bo'lmadi") }
+    }
+  }
+
   @ReactMethod fun pickRecordingFolder(promise: Promise) {
     main.post {
-      if (folderPromise != null) { promise.reject("PICKER_BUSY", "Papka tanlash oynasi allaqachon ochiq"); return@post }
+      // A result lost while Android's picker was open must not block every later attempt.
+      folderPromise?.resolve(null)
+      folderPromise = null
       try {
         val activity = currentActivity ?: throw IllegalStateException()
         folderPromise = promise

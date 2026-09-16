@@ -1,5 +1,5 @@
 import { NativeModules, PermissionsAndroid, Platform } from 'react-native';
-import type { OperatorConfiguration, RuntimeSnapshot } from './operator-model';
+import type { FolderListing, OperatorConfiguration, RecordingFolder, RuntimeSnapshot } from './operator-model';
 import { EMPTY_TELEGRAM, safeTelegramSettings } from './operator-model';
 
 export * from './operator-model';
@@ -14,6 +14,10 @@ interface RuntimeModule {
   requestBatteryAccess(): Promise<void>;
   openBatterySettings(): Promise<void>;
   pickRecordingFolder(): Promise<string | null>;
+  findRecordingFolders(): Promise<string>;
+  listFolders(path: string | null): Promise<string>;
+  checkForUpdate(): Promise<void>;
+  openInstallSettings(): Promise<void>;
 }
 
 function runtime(): RuntimeModule {
@@ -41,7 +45,7 @@ export async function sendOperatorTest(): Promise<number> {
   return runtime().sendTest();
 }
 
-export async function getRuntimeAccess(): Promise<{ allFiles: boolean; battery: boolean }> {
+export async function getRuntimeAccess(): Promise<{ allFiles: boolean; battery: boolean; installs: boolean }> {
   return JSON.parse(await runtime().checkAccess());
 }
 
@@ -52,7 +56,32 @@ export async function requestAllFilesAccess(): Promise<void> {
 }
 export async function requestBatteryAccess(): Promise<void> { await runtime().requestBatteryAccess(); }
 export async function openBatterySettings(): Promise<void> { await runtime().openBatterySettings(); }
+/** Asks the service to check GitHub now (and retry an install waiting for confirmation). */
+export async function checkForUpdate(): Promise<void> { await runtime().checkForUpdate(); }
+/** Android's "Install unknown apps" page for this app; needed for silent self-updates. */
+export async function openInstallSettings(): Promise<void> { await runtime().openInstallSettings(); }
 
+/** `access: false` means "All files access" is not granted yet. */
+export async function findRecordingFolders(): Promise<{ access: boolean; folders: RecordingFolder[] }> {
+  const result = JSON.parse(await runtime().findRecordingFolders()) as { access?: boolean; folders?: RecordingFolder[] };
+  return { access: result.access === true, folders: result.folders ?? [] };
+}
+
+/** Lists subfolders of `path` (internal storage root when null); null without "All files access". */
+export async function listFolders(path: string | null): Promise<FolderListing | null> {
+  const result = JSON.parse(await runtime().listFolders(path)) as FolderListing & { access?: boolean };
+  return result.access ? result : null;
+}
+
+/** Audio count for a saved `file://` folder; null for Android-chooser folders. */
+export async function describeRecordingFolder(uri: string): Promise<RecordingFolder | null> {
+  if (!uri.startsWith('file://')) return null;
+  let path: string;
+  try { path = decodeURIComponent(uri.slice('file://'.length)); } catch { return null; }
+  return listFolders(path);
+}
+
+/** Android's system folder chooser; a fallback to the in-app folder browser. */
 export async function pickRecordingFolder(): Promise<{ uri: string; name: string } | null> {
   const uri = await runtime().pickRecordingFolder();
   if (!uri) return null;

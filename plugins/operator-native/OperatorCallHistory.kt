@@ -313,7 +313,14 @@ class OperatorCallHistory(private val context: Context) : SQLiteOpenHelper(conte
         }
       }
     }
-    sendNext(chat, token, since)
+    // Drain a backlog without exceeding Telegram's ~20 messages per minute per group (tick = 15 s).
+    var sent = 0
+    while (sent < 4 && sendNext(chat, token, since)) sent++
+  }
+
+  /** After a restart or reconnect, make every unsent report due immediately. */
+  @Synchronized fun retryNow() {
+    writableDatabase.execSQL("UPDATE stats_queue SET due=0 WHERE sent_revision<revision")
   }
 
   private fun report(record: JSONObject): String {
@@ -357,13 +364,14 @@ class OperatorCallHistory(private val context: Context) : SQLiteOpenHelper(conte
     }.take(4000)
   }
 
-  private fun sendNext(chat: String, token: String, since: Long) {
+  /** Sends one due report; true only when Telegram accepted it. */
+  private fun sendNext(chat: String, token: String, since: Long): Boolean {
     val item = synchronized(this) {
       readableDatabase.rawQuery("SELECT q.id,q.revision,q.attempts,q.message_id,c.json FROM stats_queue q JOIN calls c ON c.id=q.id WHERE q.chat=? AND c.started>=? AND q.sent_revision<q.revision AND q.due<=? ORDER BY c.started ASC LIMIT 1", arrayOf(chat, since.toString(), System.currentTimeMillis().toString())).use {
         if (!it.moveToFirst()) null else JSONObject().put("id", it.getString(0)).put("revision", it.getLong(1)).put("attempts", it.getInt(2))
           .put("message", if (it.isNull(3)) JSONObject.NULL else it.getLong(3)).put("record", JSONObject(it.getString(4)))
       }
-    } ?: return
+    } ?: return false
     val editing = !item.isNull("message")
     val body = JSONObject().put("chat_id", chat).put("text", report(item.getJSONObject("record")))
     if (editing) body.put("message_id", item.getLong("message"))
@@ -383,7 +391,7 @@ class OperatorCallHistory(private val context: Context) : SQLiteOpenHelper(conte
             }, "chat=? AND id=?", arrayOf(chat, item.getString("id")))
           }
           prefs.edit().remove("stats_error").putLong("stats_last_sent", System.currentTimeMillis()).apply()
-          return
+          return true
         }
         retrySeconds = result.optJSONObject("parameters")?.optLong("retry_after", retrySeconds) ?: retrySeconds
         if (response.code == 401 || response.code == 403) { retrySeconds = 3600L; error = "Hisobot guruhi yoki bot tokenini tekshiring" }
@@ -396,6 +404,7 @@ class OperatorCallHistory(private val context: Context) : SQLiteOpenHelper(conte
       }, "chat=? AND id=?", arrayOf(chat, item.getString("id")))
     }
     prefs.edit().putString("stats_error", error).apply()
+    return false
   }
 
   @Synchronized fun snapshot(): JSONObject {

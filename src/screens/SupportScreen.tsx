@@ -5,12 +5,14 @@ import { Info, Phone, Send } from '../components/Icons';
 import { Button, Label, Screen } from '../components/ui';
 import { SUPPORT } from '../config';
 import type { AppUpdates } from '../hooks/useAppUpdates';
+import { describeUpdate } from '../hooks/useAppUpdates';
+import { openInstallSettings } from '../operator';
 import { useT } from '../i18n';
 import { colors, fonts, radius, space, tint } from '../theme';
 
 /**
  * Support & info screen: app version, support contacts (tap to open dialer /
- * Telegram / mail), and a manual update check (OTA + APK).
+ * Telegram / mail), and the automatic GitHub update status with a manual check.
  */
 export function SupportScreen({
   updates,
@@ -27,11 +29,13 @@ export function SupportScreen({
 
   const runCheck = async () => {
     setChecked(false);
-    await Promise.all([updates.checkOta(), updates.checkApk()]);
+    await updates.checkNow();
     setChecked(true);
   };
 
-  const checking = updates.otaChecking || updates.apkChecking;
+  const status = updates.status;
+  const checking = updates.checking;
+  const failed = status?.state === 'error' && !!status.error;
 
   return (
     <Screen>
@@ -95,7 +99,33 @@ export function SupportScreen({
               loading={checking}
               height={46}
             />
-            {checked && !updates.updateAvailable && !checking ? (
+            <View style={{ marginTop: 12, gap: 6 }}>
+              <Text style={{ color: colors.muted, fontFamily: fonts.regular, fontSize: 12, lineHeight: 18 }}>
+                Ilova GitHub’dagi yangi versiyani har 30 daqiqada tekshiradi va qo‘ng‘iroq bo‘lmagan paytda o‘zi o‘rnatadi.
+              </Text>
+              {status?.lastCheckAt ? (
+                <Text style={{ color: colors.textSoft, fontFamily: fonts.regular, fontSize: 12 }}>
+                  Oxirgi tekshiruv: {formatDate(status.lastCheckAt)}
+                </Text>
+              ) : null}
+              {status && updates.updateAvailable ? (
+                <Text style={{ color: colors.brand, fontFamily: fonts.semibold, fontSize: 13 }}>
+                  Yangi versiya {status.latestName}: {describeUpdate(status)}
+                </Text>
+              ) : null}
+              {status && !updates.updateAvailable && failed ? (
+                <Text style={{ color: colors.danger, fontFamily: fonts.medium, fontSize: 13 }}>{status.error}</Text>
+              ) : null}
+              {status && !status.canInstallPackages ? (
+                <View style={{ gap: 8 }}>
+                  <Text style={{ color: colors.warn, fontFamily: fonts.medium, fontSize: 13, lineHeight: 19 }}>
+                    Avtomatik o‘rnatish uchun Operator ilovasiga “Noma’lum ilovalarni o‘rnatish” ruxsatini bering.
+                  </Text>
+                  <Button label="O‘rnatish ruxsatini berish" variant="secondary" height={42} onPress={() => void openInstallSettings().catch(() => {})} />
+                </View>
+              ) : null}
+            </View>
+            {checked && !updates.updateAvailable && !checking && !failed ? (
               <View
                 style={{
                   marginTop: 12,
@@ -198,4 +228,10 @@ function ContactRow({
 
 function Divider() {
   return <View style={{ height: 1, backgroundColor: colors.border, marginLeft: 62 }} />;
+}
+
+function formatDate(at: number) {
+  const date = new Date(at);
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${pad(date.getDate())}.${pad(date.getMonth() + 1)}.${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }

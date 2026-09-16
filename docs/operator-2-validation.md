@@ -11,10 +11,19 @@ finishes; a compiled APK is not proof of Samsung-specific call recording access.
   Telegram QR provisioning with separate groups, and incomplete native Telegram
   settings before setup). Controlled startup/read-failure checks also confirmed
   zero writes after a failed read and preservation of both POS entries after retry.
+  A save-failure regression confirmed that when native settings are persisted
+  but starting the service fails, queued changes cannot overwrite those settings:
+  writes stay blocked until a reload, which preserves the saved POS entries.
+  Reload also recovers from configuration validation failures.
 - Native recording policy: 17 JVM checks passed against production Kotlin code.
-- APK signing: the local 2.0 test build and the previous local 1.0.0 APK use the
-  same certificate. The previous APK is retained as `dist/operator-1.0.0.apk`.
-  The final ARM release artifact still needs its own package/signing audit.
+- Final APK: full release build and lint passed. The package contains complete
+  ARM64 and ARMv7 library sets (16 per architecture), with native dependencies
+  checked against Android API 24 and 33. Signing matches the previous local 1.0.0
+  APK, retained as `dist/operator-1.0.0.apk`. All DEX files and the JavaScript
+  bundle exactly match the fixed x86 emulator candidate.
+  SHA256: `b59a39d6eddb716701f59754fdf6d21f88be9082703f2ad717fde8b1e80f2beb`.
+  The decompressed-content privacy audit checked all 1,180 APK entries against
+  the four actual private values and the private setup QR; none were found.
 - Telegram setup API: separate report messages and a synthetic silent WAV
   document upload were confirmed. These checks verify bot/group access;
   they do not validate the Android app's recording pipeline.
@@ -57,7 +66,9 @@ Follow the [Uzbek installation guide](operator-2-install-uz.md) before testing.
 After installing, verify an answered incoming call, an unanswered incoming
 call, an outgoing callback that connects, and a callback that is not answered.
 Check the POS screens, separate report group, and original audio group. The
-recording folder must be readable through Android's folder chooser.
+recording folder (normally `Recordings/Call`) must be auto-detected with its
+audio count shown, using All files access; Android's folder chooser is only a
+fallback.
 Confirm the phone actually grants call-log access after the normal APK install;
 Android classifies READ_CALL_LOG as a restricted permission whose availability
 also depends on the installer. The app keeps missing permissions visible.

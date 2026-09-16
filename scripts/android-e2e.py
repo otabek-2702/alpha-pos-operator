@@ -317,25 +317,13 @@ try:
     snapshot("04-after-reboot")
     stage("PASS: normal reboot and first unlock restore service and both saved POS without opening app")
 
-    # Normal Storage Access Framework chooser grants a folder URI; no bot token is supplied.
-    adb("shell", "mkdir", "-p", "/sdcard/Documents/OperatorTest")
+    # With "All files access" the app finds Samsung's call-recording folder itself; no bot token is supplied.
+    adb("shell", "mkdir", "-p", "/sdcard/Recordings/Call")
+    adb("shell", "echo synthetic > /sdcard/Recordings/Call/sinov-qongiroq.m4a")
+    adb("shell", "appops", "set", "--uid", APP, "MANAGE_EXTERNAL_STORAGE", "allow")
     tap("Telegram yozuvlari va hisobot", scroll=True)
-    tap("Yozuvlar papkasini tanlash", scroll=True)
-    time.sleep(2)
-    tree = ui()
-    if find("Show roots", tree):
-        tap("Show roots")
-        if find("Show internal storage"):
-            tap("Show internal storage")
-        model = adb("shell", "getprop", "ro.product.model").strip()
-        tap("Internal storage" if find("Internal storage") else model)
-    if find("Documents"):
-        tap("Documents")
-    tap("OperatorTest")
-    tap("Use this folder")
-    if find("Allow"):
-        tap("Allow")
-    wait_for(lambda: find("OperatorTest"), "selected recording folder")
+    wait_for(lambda: find("1 ta audio yozuv"), "automatically detected recording folder")
+    wait_for(lambda: find("Ichki xotira/Recordings/Call"), "selected recording folder")
     tap("Sozlamalarni saqlash")
     # Saving deliberately disables this footer button, but its text is still evidence.
     wait_for(lambda: find("Saqlandi", include_disabled=True), "folder configuration saved in the fixed footer")
@@ -345,14 +333,9 @@ try:
     launch()
     wait_for(lambda: find("Ishlayapti"), "explicit app reopen after force-stop")
     tap("Telegram yozuvlari va hisobot", scroll=True)
-    tap("Boshqa papkani tanlash", scroll=True)
-    # The persisted URI must remain readable after process recreation; cancel this second picker.
-    adb("shell", "input", "keyevent", "KEYCODE_BACK")
-    wait_for(lambda: find("OperatorTest"), "saved recording folder after app process restart")
-    uri_permissions = adb("shell", "dumpsys", "activity", "permissions")
-    (OUT / "persisted-uri-permissions.txt").write_text(uri_permissions, encoding="utf-8")
-    folder_grants = re.findall(r"(?ms)UriPermission\{[^\n]*OperatorTest[^\n]*\}.*?(?=UriPermission\{|\Z)", uri_permissions)
-    assert any(re.search(r"persistedModeFlags=0x[13579bdf]\b", grant, re.I) for grant in folder_grants), "The selected folder has no persisted Android read grant"
+    # The saved folder must still be readable after process recreation.
+    wait_for(lambda: find("Ichki xotira/Recordings/Call"), "saved recording folder after app process restart")
+    wait_for(lambda: find("1 ta audio yozuv"), "saved recording folder still readable after app process restart")
     tap("Orqaga")
     adb("shell", "input", "swipe", 360, 430, 360, 1110, 350)
     time.sleep(1)
@@ -367,13 +350,13 @@ try:
     assert ports == {8765}, f"Test after removal reached unexpected targets: {ports}"
     dismiss_test_alert()
     snapshot("06-one-pos-home")
-    stage("PASS: Android folder chooser and save; deleted POS receives no later tests")
+    stage("PASS: recording folder auto-detected and saved; deleted POS receives no later tests")
 
     state = scenario("inspect")
     (OUT / "final-state.json").write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     assert state["targetCount"] == 1, state
-    assert "OperatorTest" in state["recordings"].get("folderUri", ""), "Folder URI was not saved to native configuration"
-    assert "OperatorTest" in state["recordings"].get("folderName", ""), "Folder name was not saved"
+    assert state["recordings"].get("folderUri", "").startswith("file://") and "Recordings/Call" in state["recordings"]["folderUri"], "Folder URI was not saved to native configuration"
+    assert "Recordings/Call" in state["recordings"].get("folderName", ""), "Folder name was not saved"
     assert not state["recordings"].get("enabled"), "This synthetic test must keep Telegram audio disabled"
     assert len(state.get("periods", [])) >= 2, "Restart uptime periods not recorded"
     assert state["history"]["callCount"] >= 3, "Completed calls did not persist"

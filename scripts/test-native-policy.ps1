@@ -26,7 +26,7 @@ $compilerJars = @(
 $taskOutput = Join-Path $projectRoot '.native-policy-tests'
 New-Item -ItemType Directory -Path $taskOutput -Force | Out-Null
 & $java '-Xmx256m' '-cp' ($compilerJars -join ';') 'org.jetbrains.kotlin.cli.jvm.K2JVMCompiler' '-no-stdlib' '-no-reflect' '-classpath' $stdlib '-jvm-target' '17' '-d' $taskOutput `
-    (Join-Path $projectRoot 'plugins\operator-native\OperatorRecordingPolicy.kt') (Join-Path $projectRoot 'tests\native\OperatorRecordingPolicyTest.kt')
+    (Join-Path $projectRoot 'plugins\operator-native\OperatorRecordingPolicy.kt') (Join-Path $projectRoot 'plugins\operator-native\OperatorUpdatePolicy.kt') (Join-Path $projectRoot 'tests\native\OperatorRecordingPolicyTest.kt')
 if ($LASTEXITCODE -ne 0) { throw 'Native recording policy test compilation failed.' }
 & $java '-cp' ($taskOutput + ';' + $stdlib) '__PACKAGE__.OperatorRecordingPolicyTestKt'
 if ($LASTEXITCODE -ne 0) { throw 'Native recording policy tests failed.' }

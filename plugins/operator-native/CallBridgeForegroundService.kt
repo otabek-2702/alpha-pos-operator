@@ -48,12 +48,16 @@ class CallBridgeForegroundService : Service() {
   private val recordingWorker = Executors.newSingleThreadScheduledExecutor()
   private val callWorker = Executors.newSingleThreadScheduledExecutor()
   private val ledgerWorker = Executors.newSingleThreadExecutor()
+  private val updateWorker = Executors.newSingleThreadScheduledExecutor()
   private val websocketHttp = OkHttpClient.Builder().connectTimeout(8, TimeUnit.SECONDS)
     .pingInterval(20, TimeUnit.SECONDS).readTimeout(0, TimeUnit.MILLISECONDS).retryOnConnectionFailure(false).build()
   private val peers = LinkedHashMap<String, Peer>()
   @Volatile private var config = JSONObject()
   @Volatile private var callInProgress = false
   @Volatile private var hasPhonePermissions = false
+  @Volatile private var lastCallEndedAt = 0L
+  /** Set while a self-update is about to restart the app; Telegram sends wait for the new process. */
+  @Volatile private var pausedForUpdate = false
   private var answered = false
   private var phone = ""
   private var direction = "in"
@@ -63,6 +67,7 @@ class CallBridgeForegroundService : Service() {
   private var wakeLock: PowerManager.WakeLock? = null
   private lateinit var recordings: OperatorRecordings
   private lateinit var history: OperatorCallHistory
+  private lateinit var updater: OperatorUpdater
   private var networkCallback: ConnectivityManager.NetworkCallback? = null
   private var lastHeartbeat = 0L
   private var destroyed = false
@@ -88,6 +93,7 @@ class CallBridgeForegroundService : Service() {
     // Must post the visible foreground notification before any disk/network work.
     startForegroundNotification()
     history = OperatorCallHistory(this)
+    updater = OperatorUpdater(this)
     OperatorRuntimeStore.began(this)
     wakeLock = (getSystemService(POWER_SERVICE) as PowerManager).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:operator").apply {
       setReferenceCounted(false)
@@ -96,26 +102,73 @@ class CallBridgeForegroundService : Service() {
     try {
       val manager = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
       networkCallback = object : ConnectivityManager.NetworkCallback() {
-        override fun onAvailable(network: Network) { main.post { peers.values.forEach { it.retryAt = 0; it.discoveryAt = 0 }; tick() } }
+        override fun onAvailable(network: Network) {
+          main.post { peers.values.forEach { it.retryAt = 0; it.discoveryAt = 0 }; tick() }
+          retryPendingNow()
+        }
         override fun onLost(network: Network) { main.post { peers.values.filter { it.status != "connected" }.forEach { it.retryAt = 0 } } }
       }.also { manager.registerDefaultNetworkCallback(it) }
     } catch (_: Exception) { /* Periodic reconnect remains active if callback is unavailable. */ }
     main.post(ticker)
-    recordingWorker.scheduleWithFixedDelay({
-      try {
-        val telegram = config.optJSONObject("telegram") ?: return@scheduleWithFixedDelay
-        recordings.scan(telegram, callInProgress, hasPhonePermissions)
-        if (!callInProgress) recordings.uploadNext(telegram)
-      } catch (_: Exception) {
-        OperatorRuntimeStore.update(this) { it.put("telegramError", "Yozuvlarni tekshirishda xato; papka va ruxsatlarni tekshiring") }
-      }
-    }, 10, 15, TimeUnit.SECONDS)
-    callWorker.scheduleWithFixedDelay({
-      try {
-        history.tick(config.optJSONObject("telegram") ?: JSONObject())
-        main.post { if (!destroyed) peers.values.filter { it.status == "connected" }.forEach { sendCallRecords(it) } }
-      } catch (_: Exception) { OperatorRuntimeStore.setError(this, "Qo'ng'iroqlar hisobotini yangilab bo'lmadi; ruxsatlarni tekshiring") }
-    }, 5, 15, TimeUnit.SECONDS)
+    recordingWorker.scheduleWithFixedDelay({ processRecordings() }, 10, 15, TimeUnit.SECONDS)
+    callWorker.scheduleWithFixedDelay({ processCallHistory() }, 5, 15, TimeUnit.SECONDS)
+    updateWorker.scheduleWithFixedDelay({ runUpdater() }, OperatorUpdatePolicy.FIRST_CHECK_DELAY_MS, 60_000, TimeUnit.MILLISECONDS)
+    // A restart may follow an update, a crash or a reboot: resend everything still unsent right away.
+    retryPendingNow()
+  }
+
+  private fun processRecordings() {
+    try {
+      val telegram = config.optJSONObject("telegram") ?: return
+      recordings.scan(telegram, callInProgress, hasPhonePermissions)
+      // Drain a backlog without exceeding Telegram's ~20 messages per minute per group (15 s interval).
+      var sent = 0
+      while (sent < 4 && !callInProgress && !pausedForUpdate && recordings.uploadNext(telegram)) sent++
+    } catch (_: Exception) {
+      OperatorRuntimeStore.update(this) { it.put("telegramError", "Yozuvlarni tekshirishda xato; papka va ruxsatlarni tekshiring") }
+    }
+  }
+
+  private fun processCallHistory() {
+    if (pausedForUpdate) return
+    try {
+      history.tick(config.optJSONObject("telegram") ?: JSONObject())
+      main.post { if (!destroyed) peers.values.filter { it.status == "connected" }.forEach { sendCallRecords(it) } }
+    } catch (_: Exception) { OperatorRuntimeStore.setError(this, "Qo'ng'iroqlar hisobotini yangilab bo'lmadi; ruxsatlarni tekshiring") }
+  }
+
+  /** Makes queued recordings and reports due now; used after a restart and when internet returns. */
+  private fun retryPendingNow() {
+    if (destroyed) return
+    try {
+      recordingWorker.execute { try { recordings.retryNow() } catch (_: Exception) { }; processRecordings() }
+      callWorker.execute { try { history.retryNow() } catch (_: Exception) { }; processCallHistory() }
+    } catch (_: Exception) { /* Executors are shut down while the service is being destroyed. */ }
+  }
+
+  private fun runUpdater() {
+    try {
+      updater.tick(callInProgress, lastCallEndedAt, config.optJSONObject("telegram") ?: JSONObject()) { pauseForUpdate() }
+    } catch (_: Exception) { }
+    if (OperatorUpdater.state(this) != "installing") pausedForUpdate = false
+  }
+
+  /** Waits for in-flight Telegram sends so the update restart cannot cut or duplicate them. */
+  private fun pauseForUpdate(): Boolean {
+    pausedForUpdate = true
+    try {
+      recordingWorker.submit {}.get(5, TimeUnit.MINUTES)
+      callWorker.submit {}.get(2, TimeUnit.MINUTES)
+    } catch (_: Exception) { pausedForUpdate = false; return false }
+    if (callInProgress) { pausedForUpdate = false; return false }
+    return true
+  }
+
+  /** Install failed or needs the user: resume normal sending. */
+  fun updateFinished() { pausedForUpdate = false }
+
+  fun checkUpdateNow() {
+    try { updateWorker.execute { runUpdater() } } catch (_: Exception) { }
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -171,6 +224,7 @@ class CallBridgeForegroundService : Service() {
         }
         TelephonyManager.CALL_STATE_IDLE -> {
           if (announced) broadcast(JSONObject().put("type", "call_end").put("phone", phone))
+          if (lastState != TelephonyManager.CALL_STATE_IDLE) lastCallEndedAt = System.currentTimeMillis()
           callInProgress = false; answered = false; announced = false; phone = ""
         }
       }
@@ -376,7 +430,7 @@ class CallBridgeForegroundService : Service() {
     networkCallback?.let { try { (getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(it) } catch (_: Exception) { } }
     recordings.cancelUploads()
     history.close()
-    recordingWorker.shutdownNow(); callWorker.shutdownNow(); ledgerWorker.shutdownNow(); networkPool.shutdownNow(); websocketHttp.dispatcher.cancelAll()
+    recordingWorker.shutdownNow(); callWorker.shutdownNow(); ledgerWorker.shutdownNow(); updateWorker.shutdownNow(); networkPool.shutdownNow(); websocketHttp.dispatcher.cancelAll()
     if (wakeLock?.isHeld == true) wakeLock?.release()
     OperatorRuntimeStore.ended(this, "Xizmat to'xtadi")
     super.onDestroy()

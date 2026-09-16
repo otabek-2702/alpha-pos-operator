@@ -1,8 +1,10 @@
-import { useEffect, useState } from 'react';
-import { KeyboardAvoidingView, Linking, Platform, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { AppState, KeyboardAvoidingView, Linking, Platform, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
+import { FolderBrowser } from '../components/FolderBrowser';
 import { Button, Screen } from '../components/ui';
-import type { RuntimeSnapshot, TelegramSettings } from '../operator';
+import { describeRecordingFolder, findRecordingFolders, getRuntimeAccess, recordingFolderLabel, requestAllFilesAccess } from '../operator';
+import type { RecordingFolder, RuntimeSnapshot, TelegramSettings } from '../operator';
 import { colors, fonts, radius, space, tint } from '../theme';
 
 export interface TelegramScreenProps {
@@ -21,26 +23,91 @@ export function TelegramScreen({ config, onSave, onPickFolder, onClose, onScanSe
   const [sendCallStats, setSendCallStats] = useState(config.sendCallStats === true);
   const [statsChatId, setStatsChatId] = useState(config.statsChatId ?? '');
   const [folder, setFolder] = useState({ uri: config.folderUri, name: config.folderName });
+  const [folderInfo, setFolderInfo] = useState<RecordingFolder | null>(null);
+  const [fileAccess, setFileAccess] = useState<boolean | null>(null);
+  const [candidates, setCandidates] = useState<RecordingFolder[] | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [browsing, setBrowsing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [picking, setPicking] = useState(false);
   const [saved, setSaved] = useState(false);
   const [manual, setManual] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tokenStored, setTokenStored] = useState(snapshot?.hasToken ?? !!snapshot?.configured);
+  const autoDetected = useRef(false);
   const changed = () => { setSaved(false); setError(null); };
 
   useEffect(() => {
     if (snapshot?.hasToken || snapshot?.configured) setTokenStored(true);
   }, [snapshot?.hasToken, snapshot?.configured]);
 
+  const checkFileAccess = useCallback(async () => {
+    try { setFileAccess((await getRuntimeAccess()).allFiles); } catch { setFileAccess(false); }
+  }, []);
+
+  // "All files access" is granted in Android settings; re-check when the user comes back.
+  useEffect(() => {
+    void checkFileAccess();
+    const subscription = AppState.addEventListener('change', (next) => { if (next === 'active') void checkFileAccess(); });
+    return () => subscription.remove();
+  }, [checkFileAccess]);
+
+  const choose = (selected: RecordingFolder) => {
+    setFolder({ uri: selected.uri, name: recordingFolderLabel(selected) });
+    setFolderInfo(selected);
+    // Choosing a folder means "send these"; only possible once a bot is configured.
+    if (tokenStored) setEnabled(true);
+    setBrowsing(false);
+    changed();
+  };
+
+  const detect = async (autoSelect: boolean) => {
+    setSearching(true);
+    setError(null);
+    try {
+      const result = await findRecordingFolders();
+      setFileAccess(result.access);
+      if (!result.access) return;
+      setCandidates(result.folders);
+      const best = result.folders[0];
+      if (autoSelect && best && best.audioCount > 0) choose(best);
+    } catch {
+      setError('Yozuvlar papkasini qidirib bo‘lmadi. Papkani qo‘lda tanlang.');
+    } finally { setSearching(false); }
+  };
+
+  useEffect(() => {
+    if (fileAccess !== true) return;
+    if (folder.uri.startsWith('file://') && !folderInfo) {
+      describeRecordingFolder(folder.uri).then((info) => { if (info) setFolderInfo(info); }).catch(() => {});
+    }
+    if (!folder.uri && !autoDetected.current) {
+      autoDetected.current = true;
+      void detect(true);
+    }
+    // Runs when access becomes available; folder changes are handled by choose().
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fileAccess]);
+
+  const grantFileAccess = async () => {
+    setError(null);
+    try { await requestAllFilesAccess(); }
+    catch { setError('Sozlamani ochib bo‘lmadi. Telefon sozlamalarida ilova uchun “Barcha fayllarga kirish” ruxsatini yoqing.'); }
+  };
+
   const pick = async () => {
     setPicking(true);
     setError(null);
     try {
       const selected = await onPickFolder();
-      if (selected) { setFolder(selected); changed(); }
+      if (selected) {
+        setFolder(selected);
+        setFolderInfo(null);
+        if (tokenStored) setEnabled(true);
+        changed();
+      }
     } catch {
-      setError('Papkani ochib bo‘lmadi. Ruxsatlar bo‘limida fayllarga kirishni tekshiring.');
+      setError('Android papka oynasini ochib bo‘lmadi. “Avtomatik topish” yoki “Qo‘lda tanlash”dan foydalaning.');
     } finally { setPicking(false); }
   };
 
@@ -61,7 +128,7 @@ export function TelegramScreen({ config, onSave, onPickFolder, onClose, onScanSe
       return;
     }
     if ((enabled || sendCallStats) && !token && !tokenStored) {
-      setError('Telegramga yuborishni yoqish uchun bot tokenini kiriting.');
+      setError('Telegramga yuborishni yoqish uchun avval Telegram QR kodini skanerlang.');
       return;
     }
     if (enabled && (!group || !folder.uri)) {
@@ -84,10 +151,16 @@ export function TelegramScreen({ config, onSave, onPickFolder, onClose, onScanSe
       if (token) setTokenStored(true);
       setBotToken('');
       setSaved(true);
-    } catch {
-      setError('Sozlamalarni saqlab bo‘lmadi. Bot, guruh va papka ma’lumotlarini tekshiring.');
+    } catch (failure) {
+      // Native rejections carry a code and an Uzbek message that is safe to show.
+      const nativeFailure = failure as { code?: unknown; message?: unknown };
+      setError(typeof nativeFailure.code === 'string' && typeof nativeFailure.message === 'string' && nativeFailure.message
+        ? nativeFailure.message
+        : 'Sozlamalarni saqlab bo‘lmadi. Bot, guruh va papka ma’lumotlarini tekshiring.');
     } finally { setBusy(false); }
   };
+
+  if (browsing) return <FolderBrowser onSelect={choose} onClose={() => setBrowsing(false)} />;
 
   return (
     <Screen>
@@ -109,6 +182,40 @@ export function TelegramScreen({ config, onSave, onPickFolder, onClose, onScanSe
             <Text style={styles.noticeTitle}>Faqat yangi ovoz yozuvlari</Text>
             <Text style={styles.body}>Birinchi sozlash vaqtida papkada bor yozuvlar yuborilmaydi. Faqat sozlangandan keyin yaratilgan yangi qo‘ng‘iroq yozuvlari yuboriladi.</Text>
           </View>
+
+          <View style={styles.field}>
+            <Text style={styles.label}>Qo‘ng‘iroq yozuvlari papkasi</Text>
+            <View style={styles.folder}>
+              <Text numberOfLines={3} style={[styles.body, { color: folder.uri ? colors.text : colors.muted }]}>{folder.uri ? folder.name || 'Tanlangan papka' : 'Hali papka tanlanmagan'}</Text>
+              {folderInfo ? <Text style={styles.help}>{audioSummary(folderInfo)}</Text> : null}
+            </View>
+            {fileAccess === false ? (
+              <View style={styles.warning}>
+                <Text style={styles.body}>Samsung yozuvlarini o‘qish uchun ilovaga “Barcha fayllarga kirish” ruxsati kerak. Ochilgan oynada Operator ilovasi uchun ruxsatni yoqing va orqaga qayting.</Text>
+                <Button label="Fayllarga ruxsat berish" onPress={() => void grantFileAccess()} disabled={busy} />
+              </View>
+            ) : (
+              <>
+                <Button label="Yozuvlar papkasini avtomatik topish" onPress={() => void detect(false)} loading={searching} disabled={busy || searching || fileAccess === null} />
+                {candidates && candidates.length === 0 ? <Text style={styles.help}>Qo‘ng‘iroq yozuvlari papkasi topilmadi. Samsung “Telefon” ilovasida qo‘ng‘iroqlarni avtomatik yozib olish yoqilganini tekshiring yoki papkani qo‘lda tanlang.</Text> : null}
+                {candidates?.map((candidate) => {
+                  const selected = candidate.uri === folder.uri;
+                  return (
+                    <TouchableOpacity key={candidate.uri} accessibilityRole="button" accessibilityState={{ selected }} onPress={() => choose(candidate)} disabled={busy} style={[styles.candidate, selected && styles.candidateSelected]}>
+                      <Text style={styles.label}>{recordingFolderLabel(candidate)}{selected ? '  ✓' : ''}</Text>
+                      <Text style={styles.help}>{audioSummary(candidate)}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+                <Button label="Papkani qo‘lda tanlash" variant="secondary" onPress={() => setBrowsing(true)} disabled={busy || fileAccess === null} />
+              </>
+            )}
+            <TouchableOpacity accessibilityRole="button" onPress={() => void pick()} disabled={busy || picking} style={styles.linkButton}>
+              <Text style={styles.backText}>{picking ? 'Android oynasi ochilmoqda…' : 'Android oynasi orqali tanlash'}</Text>
+            </TouchableOpacity>
+            <Text style={styles.help}>Samsung qo‘ng‘iroq yozuvlarini odatda “Ichki xotira/Recordings/Call” papkasiga saqlaydi. Papka o‘zgarsa, undagi avvalgi yozuvlar yuborilmaydi.</Text>
+          </View>
+
           <View style={styles.toggleRow}>
             <View style={{ flex: 1 }}><Text style={styles.label}>Ovoz yozuvlarini yuborish</Text><Text style={styles.help}>Yangi audio yozuvlarni guruhga yuborish</Text></View>
             <Switch accessibilityLabel="Telegramga ovoz yozuvlarini yuborish" value={enabled} disabled={busy} onValueChange={(value) => { setEnabled(value); changed(); }} trackColor={{ false: colors.borderStrong, true: colors.brandDark }} thumbColor={enabled ? colors.brand : colors.muted} />
@@ -125,13 +232,6 @@ export function TelegramScreen({ config, onSave, onPickFolder, onClose, onScanSe
             <TextInput accessibilityLabel="Ovoz yozuvlari guruhi ID si" value={chatId} onChangeText={(value) => { setChatId(value); changed(); }} placeholder="Guruh ID si, masalan: -1001234567890" placeholderTextColor={colors.muted2} autoCapitalize="none" autoCorrect={false} editable={!busy} maxLength={24} style={styles.input} />
             <Text style={styles.help}>Bot guruhga qo‘shilgan va fayl yuborishga ruxsati bor bo‘lishi kerak.</Text>
           </View> : null}
-
-          <View style={styles.field}>
-            <Text style={styles.label}>Qo‘ng‘iroq yozuvlari papkasi</Text>
-            <View style={styles.folder}><Text numberOfLines={3} style={[styles.body, { color: folder.uri ? colors.text : colors.muted }]}>{folder.uri ? folder.name || 'Tanlangan papka' : 'Hali papka tanlanmagan'}</Text></View>
-            <Button label={folder.uri ? 'Boshqa papkani tanlash' : 'Yozuvlar papkasini tanlash'} variant="secondary" onPress={() => void pick()} loading={picking} disabled={busy || picking} />
-            <Text style={styles.help}>Samsung telefon saqlaydigan audio yozuvlar papkasini tanlang. Papka o‘zgarsa, undagi avvalgi yozuvlar yuborilmaydi.</Text>
-          </View>
 
           <View style={styles.card}>
             <View style={styles.toggleRow}>
@@ -171,10 +271,19 @@ export function TelegramScreen({ config, onSave, onPickFolder, onClose, onScanSe
           {error ? <Text accessibilityLiveRegion="polite" style={styles.error}>{error}</Text> : null}
           {saved ? <Text accessibilityLiveRegion="polite" style={styles.success}>Sozlamalar saqlandi.</Text> : null}
         </ScrollView>
-        <View style={styles.footer}><Button label={saved ? 'Saqlandi' : 'Sozlamalarni saqlash'} onPress={() => void save()} loading={busy} disabled={busy || picking || saved} /></View>
+        <View style={styles.footer}>
+          {!saved && folder.uri && folder.uri !== config.folderUri ? <Text style={styles.help}>Papka tanlandi. Kuchga kirishi uchun sozlamalarni saqlang.</Text> : null}
+          <Button label={saved ? 'Saqlandi' : 'Sozlamalarni saqlash'} onPress={() => void save()} loading={busy} disabled={busy || picking || saved} />
+        </View>
       </KeyboardAvoidingView>
     </Screen>
   );
+}
+
+function audioSummary(folder: RecordingFolder) {
+  if (folder.audioCount === 0) return 'Hozircha audio yozuv yo‘q';
+  const count = `${folder.audioCount}${folder.truncated ? '+' : ''} ta audio yozuv`;
+  return folder.latestAudioAt > 0 ? `${count} · oxirgisi ${formatDate(folder.latestAudioAt)}` : count;
 }
 
 function formatDate(at: number) {
@@ -191,6 +300,7 @@ const styles = StyleSheet.create({
   content: { padding: space.lg, gap: 20, paddingBottom: space.xl },
   notice: { backgroundColor: tint.brandBg, borderWidth: 1, borderColor: tint.brandBorder, borderRadius: radius.lg, padding: 15, gap: 7 },
   noticeTitle: { color: colors.brand, fontFamily: fonts.bold, fontSize: 16 },
+  warning: { backgroundColor: colors.inset, borderWidth: 1, borderColor: colors.warn, borderRadius: radius.md, padding: 13, gap: 10 },
   body: { color: colors.textSoft, fontFamily: fonts.regular, fontSize: 13, lineHeight: 20 },
   label: { color: colors.text, fontFamily: fonts.semibold, fontSize: 15 },
   help: { color: colors.muted, fontFamily: fonts.regular, fontSize: 12, lineHeight: 18, marginTop: 4 },
@@ -198,6 +308,8 @@ const styles = StyleSheet.create({
   field: { gap: 8 },
   input: { backgroundColor: colors.inset, color: colors.text, borderWidth: 1, borderColor: colors.borderStrong, borderRadius: radius.md, paddingHorizontal: 13, paddingVertical: 12, minHeight: 48, fontFamily: fonts.regular, fontSize: 14 },
   folder: { backgroundColor: colors.inset, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, padding: 13 },
+  candidate: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, padding: 13 },
+  candidateSelected: { borderColor: colors.brand, backgroundColor: tint.brandBg },
   card: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, padding: 16, gap: 8 },
   runtimeStatus: { color: colors.text, fontFamily: fonts.semibold, fontSize: 13 },
   stats: { flexDirection: 'row', gap: 12, marginTop: 8 },
@@ -206,5 +318,5 @@ const styles = StyleSheet.create({
   linkButton: { minHeight: 44, justifyContent: 'center' },
   error: { color: colors.danger, fontFamily: fonts.medium, fontSize: 13, lineHeight: 20 },
   success: { color: colors.connected, fontFamily: fonts.semibold, fontSize: 14 },
-  footer: { padding: space.lg, paddingBottom: 20, borderTopWidth: 1, borderTopColor: colors.border },
+  footer: { padding: space.lg, paddingBottom: 20, gap: 6, borderTopWidth: 1, borderTopColor: colors.border },
 });

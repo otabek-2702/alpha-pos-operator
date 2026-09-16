@@ -14,11 +14,12 @@ import org.json.JSONObject
 /** Runs only in the isolated emulator; writes synthetic call-log rows and removes those exact rows. */
 class OperatorRuntimeInstrumentation : Instrumentation() {
   private var mode = "test"
-  override fun onCreate(arguments: Bundle?) { super.onCreate(arguments); mode = arguments?.getString("mode") ?: "test"; start() }
+  private var source: String? = null
+  override fun onCreate(arguments: Bundle?) { super.onCreate(arguments); mode = arguments?.getString("mode") ?: "test"; source = arguments?.getString("source"); start() }
   override fun onStart() {
     val result = Bundle()
     if (mode != "test") {
-      try { result.putString("stream", OperatorScenario.run(targetContext, mode).toString() + "\n"); finish(-1, result) }
+      try { result.putString("stream", OperatorScenario.run(targetContext, mode, source).toString() + "\n"); finish(-1, result) }
       catch (error: Throwable) { result.putString("stream", "FAIL: ${error.message}\n"); finish(0, result) }
       return
     }

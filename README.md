@@ -13,8 +13,9 @@ new-recording uploads, and call reports. The interface defaults to Uzbek.
    **Sinov yuborish** to check connected POS screens; remove individual POS rows
    with **O‘chirish**.
 4. Open **Telegram yozuvlari va hisobot**, import the private Telegram setup QR
-   or enter the bot token and two group IDs, then select the Samsung recordings
-   folder. Enable audio uploads and save.
+   or enter the bot token and two group IDs. With All files access granted the app
+   auto-detects the Samsung recordings folder (`Recordings/Call`); an in-app
+   folder browser and Android's chooser are fallbacks. Enable audio uploads and save.
 5. Calls/metrics go to **Smart Food qo'ng'iroqlar ma'lumotlari**; audio files go
    to **Smart Food ovoz yozuvlari**. Only recordings created after initial setup
    are uploaded. Existing files are excluded.
@@ -78,6 +79,34 @@ iOS do not provide this Android operator runtime. See
 results and the remaining Samsung-specific checks.
 
 ---
+## Releasing updates (automatic on the phones)
+
+Phones on 2.1.0+ check `https://github.com/otabek-2702/smart-pos-operator-releases`
+every 30 minutes. A newer release is downloaded, verified (SHA-256 from
+`update.json`, package name, versionCode, signing certificate) and installed by
+Android without a prompt (`USER_ACTION_NOT_REQUIRED`; the phone must allow
+"Install unknown apps" for Operator). Installation waits until no call has been
+active for a minute. After the restart the service resends every unsent
+recording and report immediately and posts the result to the report group.
+
+```powershell
+npm run release -- -Version 2.1.1 -Notes "What changed" -Publish
+```
+
+The script sets the version (versionCode = major*10000 + minor*100 + patch),
+builds, re-signs, verifies, audits the APK for private values, writes
+`update.json` and publishes the GitHub release. Omit `-Publish` for a local
+build in `dist/release-<version>/`.
+
+**Signing.** Up to 2.0.1 the APK was signed with the public React Native
+template debug key. From 2.1.0 it is signed with a private key plus an APK
+Signature Scheme v3 rotation lineage, so phones updated in place and keep their
+data; the legacy key can no longer sign updates. Keys are created once with
+`scripts/operator-signing.ps1 -Action create -Key release` and live in
+`%USERPROFILE%\.smart-pos-operator-signing`. **Back that folder up offline** —
+without it no installed phone can be updated again. The `ci` key is for emulator
+tests only (`.github/workflows/android-update-validation.yml`).
+
 ## Prerequisites
 
 - Node.js 18+ and npm.

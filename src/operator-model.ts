@@ -30,7 +30,24 @@ export interface RuntimePeriod {
   approximate?: boolean;
 }
 
+/** Native self-update state (GitHub releases, installed between calls). */
+export interface UpdateStatus {
+  installedCode: number;
+  installedName: string;
+  state: 'idle' | 'checking' | 'downloading' | 'ready' | 'installing' | 'installed' | 'waiting_user' | 'error';
+  latestCode: number;
+  latestName: string;
+  notes: string;
+  lastCheckAt: number;
+  nextCheckAt: number;
+  downloaded: number;
+  size: number;
+  error: string;
+  canInstallPackages: boolean;
+}
+
 export interface RuntimeSnapshot {
+  update?: UpdateStatus;
   running: boolean;
   startedAt: number | null;
   lastHeartbeatAt: number | null;
@@ -58,6 +75,27 @@ export interface RuntimeSnapshot {
     lastSentAt?: number;
     lastError?: string;
   };
+}
+
+/** A folder in the phone's shared storage, read directly with "All files access". */
+export interface RecordingFolder {
+  uri: string;
+  path: string;
+  /** Path relative to internal storage, e.g. `Recordings/Call`; empty for the storage root. */
+  name: string;
+  audioCount: number;
+  latestAudioAt: number;
+  truncated?: boolean;
+}
+
+export interface FolderListing extends RecordingFolder {
+  isRoot: boolean;
+  parent: string | null;
+  folders: { path: string; name: string }[];
+}
+
+export function recordingFolderLabel(folder: Pick<RecordingFolder, 'name'>): string {
+  return folder.name ? `Ichki xotira/${folder.name}` : 'Ichki xotira';
 }
 
 export const EMPTY_TELEGRAM: TelegramSettings = {

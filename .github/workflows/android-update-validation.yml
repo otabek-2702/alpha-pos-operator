@@ -1,0 +1,186 @@
+name: Validate Operator key rotation and silent self-update
+
+# Emulator proof for the phone's update path:
+#  1. an old build signed with the public legacy key keeps its saved POS settings
+#     when a build signed with the rotated private key is installed over it;
+#  2. that build then downloads, verifies and installs a newer build by itself,
+#     with no user interaction, and its service restarts after the update.
+# The CI key used here is test-only; production releases use a different key.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: Numeric ID of the draft release holding the candidate APKs
+        required: true
+        type: string
+      sums_sha256:
+        description: SHA256 of the SHA256SUMS asset listing every candidate APK
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: android-update-${{ inputs.release_id }}
+  cancel-in-progress: false
+
+jobs:
+  update:
+    if: github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    name: Android API ${{ matrix.api }}
+    strategy:
+      fail-fast: false
+      matrix:
+        api: [33, 35]
+    timeout-minutes: 30
+    permissions:
+      # Draft releases are visible only with push access. This job only downloads.
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Download and verify the candidate APKs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          SUMS_SHA256: ${{ inputs.sums_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_ID" =~ ^[0-9]+$ ]]
+          [[ "$SUMS_SHA256" =~ ^[[:xdigit:]]{64}$ ]]
+          mkdir -p ci/update
+          gh api "repos/$GH_REPO/releases/$RELEASE_ID" > ci/release.json
+          jq -e '.draft == true' ci/release.json > /dev/null
+          fetch() {
+            local id
+            id=$(jq -er --arg name "$1" '[.assets[] | select(.name == $name and .state == "uploaded")] | if length == 1 then .[0].id else error("Expected exactly one asset") end' ci/release.json)
+            gh api -H 'Accept: application/octet-stream' "repos/$GH_REPO/releases/assets/$id" > "ci/$1"
+          }
+          fetch SHA256SUMS
+          echo "${SUMS_SHA256,,}  ci/SHA256SUMS" | sha256sum --check
+          for name in operator-old-x86_64.apk operator-old-androidTest.apk operator-ci-x86_64.apk operator-ci-androidTest.apk operator-next-x86_64.apk; do
+            grep -Eq "^[[:xdigit:]]{64}  $name\$" ci/SHA256SUMS
+            fetch "$name"
+          done
+          (cd ci && sha256sum --check SHA256SUMS)
+
+      - name: Prepare the update scenario
+        run: |
+          set -euo pipefail
+          tools="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          badging=$("$tools/aapt" dump badging ci/operator-next-x86_64.apk | head -1)
+          next_code=$(sed -E "s/.*versionCode='([0-9]+)'.*/\1/" <<< "$badging")
+          next_name=$(sed -E "s/.*versionName='([^']+)'.*/\1/" <<< "$badging")
+          mkdir -p ci/serve
+          cp ci/operator-next-x86_64.apk "ci/serve/operator-$next_name.apk"
+          cat > ci/serve/update.json <<JSON
+          {"versionCode": $next_code, "versionName": "$next_name", "apkUrl": "http://10.0.2.2:8123/operator-$next_name.apk",
+           "sha256": "$(sha256sum ci/operator-next-x86_64.apk | cut -d' ' -f1)", "size": $(stat -c %s ci/operator-next-x86_64.apk), "notes": "CI"}
+          JSON
+          echo "$next_code" > ci/next-code
+          cat > ci/run-update.sh <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          d=emulator-5554
+          app=com.alphapos.operatorlink
+          runner="$app.test/$app.OperatorRuntimeInstrumentation"
+          next_code=$(cat ci/next-code)
+          log() { echo "$*" | tee -a ci/update/results.txt; }
+          trap 'adb -s $d logcat -d > ci/update/logcat.txt 2>&1 || true; adb -s $d shell dumpsys package $app > ci/update/package.txt 2>&1 || true' EXIT
+          scenario() {
+            local out
+            out=$(adb -s $d shell am instrument -w -r -e mode "$@" "$runner" | tr -d '\r')
+            echo "$out" >> ci/update/instrumentation.txt
+            grep -q '^INSTRUMENTATION_CODE: -1$' <<< "$out"
+            if grep -q 'FAIL:' <<< "$out"; then return 1; fi
+            sed -n 's/.*stream=//p' <<< "$out"
+          }
+          # Capture first: grep -q closing a pipe early would fail the producer under pipefail.
+          version() { local s; s=$(adb -s $d shell dumpsys package $app | tr -d '\r') || true; grep -m1 -oE 'versionCode=[0-9]+' <<< "$s" | cut -d= -f2 || true; }
+          service_alive() { local s; s=$(adb -s $d shell dumpsys activity services $app) || return 1; grep -q 'isForeground=true' <<< "$s"; }
+
+          adb -s $d install -r -g ci/operator-old-x86_64.apk
+          adb -s $d install -r -g ci/operator-old-androidTest.apk
+          state=$(scenario setup)
+          grep -q '"targetCount":2' <<< "$state"
+          log "PASS: old legacy-key build installed with two saved POS"
+
+          adb -s $d install -r ci/operator-ci-x86_64.apk
+          adb -s $d uninstall $app.test
+          adb -s $d install -r -g ci/operator-ci-androidTest.apk
+          state=$(scenario inspect)
+          grep -q '"targetCount":2' <<< "$state"
+          log "PASS: rotated-key build installed in place; encrypted POS settings preserved"
+
+          python3 -m http.server 8123 --directory ci/serve > ci/update/http.log 2>&1 &
+          adb -s $d shell appops set $app REQUEST_INSTALL_PACKAGES allow
+          scenario update-source -e source http://10.0.2.2:8123/update.json > /dev/null
+          adb -s $d shell am start -n $app/.MainActivity
+          for _ in $(seq 1 90); do [[ "$(version)" == "$next_code" ]] && break; sleep 5; done
+          [[ "$(version)" == "$next_code" ]]
+          grep -q 'GET /operator-' ci/update/http.log
+          log "PASS: app downloaded and installed $next_code by itself, with no confirmation"
+
+          for _ in $(seq 1 30); do service_alive && break; sleep 2; done
+          service_alive
+          log "PASS: foreground service restarted after the self-update"
+
+          for _ in $(seq 1 30); do
+            state=$(scenario inspect) || state=''
+            grep -q '"state":"idle"' <<< "$state" && grep -q "\"installedCode\":$next_code" <<< "$state" && break
+            sleep 5
+          done
+          grep -q '"state":"idle"' <<< "$state"
+          grep -q '"targetCount":2' <<< "$state"
+          log "PASS: update recorded as finished; POS settings still present"
+          SCRIPT
+          bash -n ci/run-update.sh
+
+      - name: Enable Android hardware acceleration
+        run: |
+          set -euo pipefail
+          printf '%s\n' 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo udevadm settle --timeout=30
+          test -c /dev/kvm
+          sudo chmod 0666 /dev/kvm
+
+      - name: Run the update scenario
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: ${{ matrix.api }}
+          target: google_apis
+          arch: x86_64
+          cores: 2
+          ram-size: 2048M
+          emulator-boot-timeout: 420
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
+          script: bash ci/run-update.sh
+
+      - name: Report
+        if: always()
+        run: |
+          for file in ci/update/results.txt ci/update/http.log; do
+            if [[ -s "$file" ]]; then
+              printf '\n%s\n\n```text\n' "$file" >> "$GITHUB_STEP_SUMMARY"
+              head -c 20000 "$file" >> "$GITHUB_STEP_SUMMARY"
+              printf '\n```\n' >> "$GITHUB_STEP_SUMMARY"
+              cat "$file"
+            fi
+          done
+          grep -iE 'PackageInstaller|OperatorUpdate|AndroidRuntime' ci/update/logcat.txt | tail -80 || true
+
+      - name: Save evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: operator-update-evidence-api-${{ matrix.api }}
+          path: ci/update/
+          retention-days: 7
+          if-no-files-found: ignore

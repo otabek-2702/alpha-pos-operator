@@ -1,11 +1,16 @@
 package __PACKAGE__
 
+import android.Manifest
 import android.content.ContentValues
 import android.content.Context
+import android.content.pm.PackageManager
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
 import android.provider.DocumentsContract
+import androidx.core.content.ContextCompat
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
@@ -14,6 +19,8 @@ import okhttp3.RequestBody
 import okio.BufferedSink
 import okio.source
 import org.json.JSONObject
+import java.io.File
+import java.io.FileInputStream
 import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -28,6 +35,23 @@ class OperatorRecordings(private val context: Context, private val inventorySour
   companion object {
     val lock = Any()
     private val AUDIO = setOf("m4a", "mp3", "amr", "aac", "wav", "ogg", "opus", "3gp", "flac", "mp4")
+
+    fun isAudio(name: String, mime: String = ""): Boolean = name.substringAfterLast('.', "").lowercase(Locale.ROOT) in AUDIO || mime.startsWith("audio/")
+
+    fun storageRoot(): File = Environment.getExternalStorageDirectory().canonicalFile
+
+    /** The dedicated operator phone reads recordings directly; Android's folder chooser is only a fallback. */
+    fun hasAllFilesAccess(context: Context): Boolean = if (Build.VERSION.SDK_INT >= 30) Environment.isExternalStorageManager()
+      else ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+
+    /** A `file://` folder must be inside shared storage and never the storage root itself. */
+    fun localFolder(uri: String): File {
+      val parsed = Uri.parse(uri)
+      require(parsed.scheme == "file" && !parsed.path.isNullOrBlank()) { "Ovoz yozuvlari papkasini qayta tanlang" }
+      val folder = File(parsed.path!!).canonicalFile
+      require(folder.path.startsWith(storageRoot().path + File.separator)) { "Yozuvlar papkasi telefon xotirasida bo'lishi kerak" }
+      return folder
+    }
   }
   private val http = OkHttpClient.Builder().connectTimeout(20, TimeUnit.SECONDS).writeTimeout(180, TimeUnit.SECONDS)
     .readTimeout(60, TimeUnit.SECONDS).callTimeout(240, TimeUnit.SECONDS).retryOnConnectionFailure(false).build()
@@ -40,6 +64,7 @@ class OperatorRecordings(private val context: Context, private val inventorySour
 
   fun inventory(folder: String): List<OperatorAudioFile> {
     inventorySource?.let { return it(folder) }
+    if (Uri.parse(folder).scheme == "file") return localInventory(localFolder(folder))
     val tree = Uri.parse(folder)
     require(tree.scheme == "content" && DocumentsContract.isTreeUri(tree)) { "Ovoz yozuvlari papkasini qayta tanlang" }
     val result = ArrayList<OperatorAudioFile>()
@@ -58,7 +83,7 @@ class OperatorRecordings(private val context: Context, private val inventorySour
           val name = it.getString(1) ?: "recording"
           val mime = it.getString(2) ?: ""
           if (mime == DocumentsContract.Document.MIME_TYPE_DIR) walk(id, depth + 1)
-          else if (name.substringAfterLast('.', "").lowercase(Locale.ROOT) in AUDIO || mime.startsWith("audio/")) {
+          else if (isAudio(name, mime)) {
             result.add(OperatorAudioFile(DocumentsContract.buildDocumentUriUsingTree(tree, id).toString(), name, if (it.isNull(3)) -1L else it.getLong(3), if (it.isNull(4)) 0L else it.getLong(4)))
           }
           require(seen.size + result.size < 50_000) { "Papka juda katta; faqat qo'ng'iroq yozuvlari papkasini tanlang" }
@@ -66,6 +91,24 @@ class OperatorRecordings(private val context: Context, private val inventorySour
       }
     }
     walk(DocumentsContract.getTreeDocumentId(tree), 0)
+    return result
+  }
+
+  private fun localInventory(folder: File): List<OperatorAudioFile> {
+    require(hasAllFilesAccess(context)) { "Yozuvlarni o'qish uchun \"Barcha fayllarga kirish\" ruxsatini bering" }
+    require(folder.isDirectory) { "Yozuvlar papkasi topilmadi; papkani qayta tanlang" }
+    val result = ArrayList<OperatorAudioFile>()
+    var visited = 0
+    fun walk(directory: File, depth: Int) {
+      require(depth <= 12) { "Papka juda chuqur; yozuvlar turgan papkani tanlang" }
+      val children = directory.listFiles() ?: throw IOException("Papka ochilmadi; fayllarga ruxsatni tekshiring")
+      for (child in children) {
+        require(++visited < 50_000) { "Papka juda katta; faqat qo'ng'iroq yozuvlari papkasini tanlang" }
+        if (child.isDirectory) walk(child, depth + 1)
+        else if (isAudio(child.name)) result.add(OperatorAudioFile(Uri.fromFile(child).toString(), child.name, child.length(), child.lastModified()))
+      }
+    }
+    walk(folder, 0)
     return result
   }
 
@@ -134,8 +177,9 @@ class OperatorRecordings(private val context: Context, private val inventorySour
     if (!telegram.optBoolean("enabled") || !configured(telegram)) return@synchronized
     val baseline = telegram.optString("_baseline")
     if (baseline.isBlank()) { error("Papka uchun boshlang'ich tekshiruv kerak; Telegram sozlamalarini saqlang"); return@synchronized }
-    val files = try { inventory(telegram.getString("folderUri")) } catch (_: Exception) {
-      error("Yozuvlar papkasi ochilmadi. Papkani va fayl ruxsatlarini tekshiring"); return@synchronized
+    val files = try { inventory(telegram.getString("folderUri")) } catch (failure: Exception) {
+      // Validation messages are ours (e.g. missing all-files access); other errors stay generic.
+      error((failure as? IllegalArgumentException)?.message ?: "Yozuvlar papkasi ochilmadi. Papkani va fayl ruxsatlarini tekshiring"); return@synchronized
     }
     val now = System.currentTimeMillis()
     val db = writableDatabase
@@ -169,9 +213,16 @@ class OperatorRecordings(private val context: Context, private val inventorySour
     } finally { db.endTransaction() }
   }
 
-  fun uploadNext(telegram: JSONObject) {
-    if (!telegram.optBoolean("enabled") || !configured(telegram)) return
-    if (OperatorRuntimeStore.state(context).optBoolean("telegramBlocked")) return
+  /** Makes every queued upload due now and lifts a stale configuration block (restart, reconnect). */
+  fun retryNow() = synchronized(lock) {
+    writableDatabase.execSQL("UPDATE recordings SET next_attempt=0 WHERE state='pending'")
+    OperatorRuntimeStore.update(context) { it.remove("telegramBlocked") }
+  }
+
+  /** Uploads one due recording; true only when Telegram accepted it. */
+  fun uploadNext(telegram: JSONObject): Boolean {
+    if (!telegram.optBoolean("enabled") || !configured(telegram)) return false
+    if (OperatorRuntimeStore.state(context).optBoolean("telegramBlocked")) return false
     val baseline = telegram.optString("_baseline")
     val now = System.currentTimeMillis()
     var file: OperatorAudioFile? = null
@@ -181,22 +232,27 @@ class OperatorRecordings(private val context: Context, private val inventorySour
         if (it.moveToFirst()) { file = OperatorAudioFile(it.getString(0), it.getString(1), it.getLong(2), it.getLong(3)); attempts = it.getInt(4) }
       }
     }
-    val selected = file ?: return
+    val selected = file ?: return false
     try {
       val uri = Uri.parse(selected.uri)
+      val local = if (uri.scheme == "file") File(uri.path ?: "") else null
+      fun resumedWriting() = synchronized(lock) { writableDatabase.update("recordings", ContentValues().apply { put("state", "watching"); put("stable_since", now) }, "baseline=? AND uri=?", arrayOf(baseline, selected.uri)) }
       // Recheck just before streaming so a recording that resumed writing is never uploaded early.
-      context.contentResolver.query(uri, arrayOf(DocumentsContract.Document.COLUMN_SIZE, DocumentsContract.Document.COLUMN_LAST_MODIFIED), null, null, null)?.use { row ->
-        if (!row.moveToFirst()) throw IOException("missing recording")
-        if (row.getLong(0) != selected.size || row.getLong(1) != selected.modified) {
-          synchronized(lock) { writableDatabase.update("recordings", ContentValues().apply { put("state", "watching"); put("stable_since", now) }, "baseline=? AND uri=?", arrayOf(baseline, selected.uri)) }
-          return
-        }
-      } ?: throw IOException("missing recording")
+      if (local != null) {
+        if (!hasAllFilesAccess(context)) throw SecurityException("all files access revoked")
+        if (!local.isFile) throw IOException("missing recording")
+        if (local.length() != selected.size || local.lastModified() != selected.modified) { resumedWriting(); return false }
+      } else {
+        context.contentResolver.query(uri, arrayOf(DocumentsContract.Document.COLUMN_SIZE, DocumentsContract.Document.COLUMN_LAST_MODIFIED), null, null, null)?.use { row ->
+          if (!row.moveToFirst()) throw IOException("missing recording")
+          if (row.getLong(0) != selected.size || row.getLong(1) != selected.modified) { resumedWriting(); return false }
+        } ?: throw IOException("missing recording")
+      }
       val body = object : RequestBody() {
         override fun contentType() = "application/octet-stream".toMediaType()
         override fun contentLength() = selected.size
         override fun writeTo(sink: BufferedSink) {
-          val input = context.contentResolver.openInputStream(uri) ?: throw IOException("recording unavailable")
+          val input = if (local != null) FileInputStream(local) else context.contentResolver.openInputStream(uri) ?: throw IOException("recording unavailable")
           input.source().use { sink.writeAll(it) }
         }
       }
@@ -215,6 +271,7 @@ class OperatorRecordings(private val context: Context, private val inventorySour
             }, "baseline=? AND uri=?", arrayOf(baseline, selected.uri))
           }
           OperatorRuntimeStore.update(context) { it.remove("telegramError") }
+          return true
         } else {
           val code = json.optInt("error_code", response.code)
           if (code == 400 || code == 401 || code == 403 || code == 404) {
@@ -227,11 +284,12 @@ class OperatorRecordings(private val context: Context, private val inventorySour
         }
       }
     } catch (_: SecurityException) {
-      error("Yozuvni o'qishga ruxsat yo'q; papkani qayta tanlang")
-      retry(selected, baseline, attempts, 300, "Yozuvni o'qishga ruxsat yo'q; papkani qayta tanlang")
+      val message = if (selected.uri.startsWith("file:")) "Yozuvni o'qish uchun \"Barcha fayllarga kirish\" ruxsatini bering" else "Yozuvni o'qishga ruxsat yo'q; papkani qayta tanlang"
+      retry(selected, baseline, attempts, 300, message)
     } catch (_: Exception) {
       retry(selected, baseline, attempts, OperatorRecordingPolicy.retrySeconds(attempts), "Yozuv yuborilmadi; internet tiklangach qayta yuboriladi")
     }
+    return false
   }
 
   private fun retry(file: OperatorAudioFile, baseline: String, attempts: Int, seconds: Long, message: String) {

@@ -10,7 +10,7 @@ const loaded = new Module(filename, module);
 loaded._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
 }).outputText, filename);
-const { parsePairingCode, parseTelegramSetupCode, upsertPos, inspectPosUrl, safeTelegramSettings } = loaded.exports;
+const { parsePairingCode, parseTelegramSetupCode, upsertPos, inspectPosUrl, safeTelegramSettings, recordingFolderLabel } = loaded.exports;
 const qr = (id, ip, token = id) => JSON.stringify({
   version: 2, id, name: `POS ${id}`, url: `ws://${ip}:8765?token=${token}`, discoveryPort: 8766,
 });
@@ -92,4 +92,9 @@ test('Telegram import rejects a shared destination and never echoes the token', 
   const token = '12345:abcdefghijklmnopqrstuvwx';
   assert.throws(() => parseTelegramSetupCode(JSON.stringify({ type: 'smart_pos_telegram', version: 1,
     botToken: token, chatId: '-100111', statsChatId: '-100111' })), error => !error.message.includes(token));
+});
+
+test('recording folders are labelled relative to internal storage', () => {
+  assert.equal(recordingFolderLabel({ name: 'Recordings/Call' }), 'Ichki xotira/Recordings/Call');
+  assert.equal(recordingFolderLabel({ name: '' }), 'Ichki xotira');
 });

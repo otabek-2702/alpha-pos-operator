@@ -3,7 +3,7 @@ import { ActivityIndicator, AppState, ScrollView, StyleSheet, Text, TouchableOpa
 
 import { Bell, CallLog, Camera, CheckCircle, Phone, Settings, XCircle } from '../components/Icons';
 import { Button, Screen } from '../components/ui';
-import { getRuntimeAccess, openBatterySettings, requestAllFilesAccess, requestBatteryAccess } from '../operator';
+import { getRuntimeAccess, openBatterySettings, openInstallSettings, requestAllFilesAccess, requestBatteryAccess } from '../operator';
 import { checkPermissions, hasRequiredPermissions, openAppSettings, requestAllPermissions, type PermissionState } from '../permissions';
 import { colors, fonts, radius, space, tint } from '../theme';
 
@@ -18,10 +18,12 @@ const ROWS = [
   { key: 'camera', title: 'Kamera', description: 'POS ni bir marta QR-kod orqali qo‘shish', Icon: Camera },
   { key: 'notifications', title: 'Bildirishnomalar', description: 'Fonda ishlayotgan xizmat holatini ko‘rsatish', Icon: Bell },
 ] as const;
+/** Runtime rows plus all-files, battery and install-updates special access. */
+const TOTAL = ROWS.length + 3;
 
 export function PermissionsScreen({ onReady, onClose }: PermissionsScreenProps) {
   const [state, setState] = useState<PermissionState | null>(null);
-  const [access, setAccess] = useState<{ allFiles: boolean; battery: boolean } | null>(null);
+  const [access, setAccess] = useState<{ allFiles: boolean; battery: boolean; installs: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const [attempted, setAttempted] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -55,7 +57,7 @@ export function PermissionsScreen({ onReady, onClose }: PermissionsScreenProps) 
 
   const ready = !!state && hasRequiredPermissions(state);
   const runtimeComplete = !!state && ROWS.every((row) => state[row.key]);
-  const totalGranted = (state ? ROWS.filter((row) => state[row.key]).length : 0) + (access?.allFiles ? 1 : 0) + (access?.battery ? 1 : 0);
+  const totalGranted = (state ? ROWS.filter((row) => state[row.key]).length : 0) + (access?.allFiles ? 1 : 0) + (access?.battery ? 1 : 0) + (access?.installs ? 1 : 0);
 
   return (
     <Screen>
@@ -65,8 +67,8 @@ export function PermissionsScreen({ onReady, onClose }: PermissionsScreenProps) 
       </View>
       <ScrollView contentContainerStyle={styles.content}>
         <Text style={styles.description}>Qo‘ng‘iroqlarni POS ga yuborish va ovoz yozuvlarini o‘qish uchun quyidagi ruxsatlarni bering. Ilova har safar haqiqiy ruxsat holatini tekshiradi.</Text>
-        <View style={styles.progressRow}><Text style={styles.progressLabel}>Berilgan ruxsatlar</Text><Text style={[styles.progressLabel, { color: totalGranted === 6 ? colors.connected : colors.brand }]}>{totalGranted} / 6</Text></View>
-        <View style={styles.progress}><View style={{ height: '100%', width: `${totalGranted / 6 * 100}%`, backgroundColor: totalGranted === 6 ? colors.connected : colors.brand, borderRadius: radius.pill }} /></View>
+        <View style={styles.progressRow}><Text style={styles.progressLabel}>Berilgan ruxsatlar</Text><Text style={[styles.progressLabel, { color: totalGranted === TOTAL ? colors.connected : colors.brand }]}>{totalGranted} / {TOTAL}</Text></View>
+        <View style={styles.progress}><View style={{ height: '100%', width: `${totalGranted / TOTAL * 100}%`, backgroundColor: totalGranted === TOTAL ? colors.connected : colors.brand, borderRadius: radius.pill }} /></View>
         {!state ? <ActivityIndicator color={colors.brand} /> : ROWS.map((row) => (
           <View key={row.key} style={styles.permissionRow}>
             <row.Icon size={22} color={state[row.key] ? colors.connected : colors.muted} />
@@ -76,6 +78,7 @@ export function PermissionsScreen({ onReady, onClose }: PermissionsScreenProps) 
         ))}
         <SpecialPermission title="Barcha fayllarga kirish" description="Telefon saqlagan audio yozuvlarni topish uchun Android fayl ruxsati." granted={access?.allFiles ?? false} checked={access !== null} label="Fayllarga ruxsat berish" onPress={() => void act(requestAllFilesAccess)} disabled={busy} />
         <SpecialPermission title="Batareya cheklovini olib tashlash" description="Ekran o‘chganda ham xizmatning ishlashiga ruxsat bering." granted={access?.battery ?? false} checked={access !== null} label="Batareya ruxsatini berish" onPress={() => void act(requestBatteryAccess)} disabled={busy} />
+        <SpecialPermission title="Avtomatik yangilanish" description="Ilova yangi versiyasini o‘zi o‘rnatishi uchun “Noma’lum ilovalarni o‘rnatish” ruxsati. Ochilgan oynada Operator uchun ruxsatni yoqing." granted={access?.installs ?? false} checked={access !== null} label="O‘rnatish ruxsatini berish" onPress={() => void act(openInstallSettings)} disabled={busy} />
 
         <View style={styles.samsungCard}>
           <Text style={styles.samsungTitle}>Samsung uchun qo‘shimcha sozlama</Text>
@@ -84,7 +87,7 @@ export function PermissionsScreen({ onReady, onClose }: PermissionsScreenProps) 
           <Text style={styles.help}>Ilova qayta yoqilganda xizmatni tiklaydi. Android sozlamalaridagi “Majburan to‘xtatish”dan keyin ilovani qo‘lda ochish kerak. Telefon o‘chgan davrda xizmat ishlamaydi.</Text>
         </View>
         {attempted && !runtimeComplete ? <View style={styles.notice}><Text style={styles.description}>Agar ruxsat oynasi boshqa ochilmasa, ilova sozlamalarida ruxsatlarni yoqing. Kamera va bildirishnomalar uchun ham ruxsat berish tavsiya etiladi.</Text><Button label="Ilova sozlamalarini ochish" variant="secondary" onPress={() => void act(openAppSettings)} disabled={busy} /></View> : null}
-        {ready && totalGranted < 6 ? <Text style={styles.help}>Qo‘ng‘iroqlar uchun asosiy ruxsatlar berildi. Qolgan ruxsatlar QR skaneri, yozuvlar va fonda ishlash uchun kerak.</Text> : null}
+        {ready && totalGranted < TOTAL ? <Text style={styles.help}>Qo‘ng‘iroqlar uchun asosiy ruxsatlar berildi. Qolgan ruxsatlar QR skaneri, yozuvlar va fonda ishlash uchun kerak.</Text> : null}
         {error ? <Text accessibilityLiveRegion="polite" style={styles.error}>{error}</Text> : null}
       </ScrollView>
       <View style={styles.footer}>

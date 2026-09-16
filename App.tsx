@@ -56,7 +56,7 @@ function Root() {
   const [runtimeError, setRuntimeError] = useState('');
   const [testing, setTesting] = useState(false);
   const mutation = useRef<Promise<void>>(Promise.resolve());
-  const updates = useAppUpdates();
+  const updates = useAppUpdates(snapshot?.update ?? null);
 
   const refresh = useCallback(async () => {
     try {
