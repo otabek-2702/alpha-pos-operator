@@ -95,6 +95,16 @@ def wait_for(check, description, seconds=60):
     raise AssertionError(f"Timed out: {description}")
 
 
+def show_folder_section():
+    # The folder box sits below the Telegram cards; scroll in small steps so it is not overshot.
+    for _ in range(6):
+        if find("Yozuvlar papkasini avtomatik topish", include_disabled=True):
+            return
+        adb("shell", "input", "swipe", 360, 900, 360, 650, 300)
+        time.sleep(1)
+    raise AssertionError("Recording folder section is not reachable")
+
+
 def dismiss_test_alert():
     # React Native's default Alert is not cancelable with Android's Back button.
     wait_for(lambda: find("Sinov yuborildi"), "Send test confirmation dialog", 15)
@@ -322,6 +332,7 @@ try:
     adb("shell", "echo synthetic > /sdcard/Recordings/Call/sinov-qongiroq.m4a")
     adb("shell", "appops", "set", "--uid", APP, "MANAGE_EXTERNAL_STORAGE", "allow")
     tap("Telegram yozuvlari va hisobot", scroll=True)
+    show_folder_section()
     wait_for(lambda: find("1 ta audio yozuv"), "automatically detected recording folder")
     wait_for(lambda: find("Ichki xotira/Recordings/Call"), "selected recording folder")
     tap("Sozlamalarni saqlash")
@@ -334,6 +345,7 @@ try:
     wait_for(lambda: find("Ishlayapti"), "explicit app reopen after force-stop")
     tap("Telegram yozuvlari va hisobot", scroll=True)
     # The saved folder must still be readable after process recreation.
+    show_folder_section()
     wait_for(lambda: find("Ichki xotira/Recordings/Call"), "saved recording folder after app process restart")
     wait_for(lambda: find("1 ta audio yozuv"), "saved recording folder still readable after app process restart")
     tap("Orqaga")
