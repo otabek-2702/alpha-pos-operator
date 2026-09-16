@@ -112,7 +112,8 @@ class OperatorUpdater(private val context: Context) {
           prefs(context).edit().putString("state", "waiting_user").putString("error", reason).commit()
           if (confirm != null) askUser(context, confirm)
         }
-        PackageInstaller.STATUS_SUCCESS -> prefs(context).edit().putString("state", "installed").commit()
+        // Delivered to the new process, often after startup already recorded the update.
+        PackageInstaller.STATUS_SUCCESS -> finishIfInstalled(context)
         else -> fail(context, when (status) {
           PackageInstaller.STATUS_FAILURE_ABORTED -> "O'rnatish bekor qilindi"
           PackageInstaller.STATUS_FAILURE_BLOCKED -> "Telefon o'rnatishni blokladi"
