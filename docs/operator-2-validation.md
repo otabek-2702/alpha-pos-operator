@@ -54,6 +54,31 @@ finishes; a compiled APK is not proof of Samsung-specific call recording access.
   remains as a backup. Installer/source hashes are recorded in the desktop
   release manifest.
 
+## Operator 2.1.0 (self-update) validation
+
+Commit `42117ae`, emulator APKs signed with the CI test key (same code as the
+release build; the production APK is signed with the private release key).
+
+- [Update path](https://github.com/otabek-2702/alpha-pos-operator/actions/runs/35136052529),
+  Android 13 and 15: a 2.0.0 build signed with the legacy public key and two
+  saved POS was updated in place to the rotated-key 2.1.0 build; the encrypted
+  settings survived. 2.1.0 then downloaded 2.1.1 from a local update server,
+  verified it and installed it with no user interaction
+  (`installerPackageName` became the app itself). The foreground service
+  restarted and the update was recorded as finished.
+  The first run caught `INSTALL_FAILED_DUPLICATE_PERMISSION`
+  (AndroidX signature permission owned by the legacy key); the lineage now keeps
+  the legacy permission capability. Revoke it after all phones are migrated.
+- [Full UI and service suite](https://github.com/otabek-2702/alpha-pos-operator/actions/runs/35136056115),
+  Android 13 and 15: onboarding, two POS, send test, answered and missed calls,
+  task removal, reboot recovery, automatic `Recordings/Call` detection and
+  save, POS deletion, durable call records and uptime periods.
+- JVM policy checks: 32 passed (17 recording, 15 update). TypeScript and
+  10 JavaScript tests passed. APK privacy audit passed for every build.
+
+Not yet checked on the physical Samsung: the Samsung call-recording folder,
+the "Install unknown apps" grant and a real self-update from GitHub.
+
 ## Physical Samsung check
 
 The user confirmed **Samsung SM-A037F/DS, Android 13, one active SIM**. The
