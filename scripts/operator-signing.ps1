@@ -4,7 +4,10 @@ Operator APK signing with key rotation (APK Signature Scheme v3).
 Versions up to 2.0.1 were signed with the public React Native template debug key.
 `create` makes a private key and a signed proof-of-rotation (lineage) from that
 legacy key, so phones update in place without losing their settings. The legacy
-key keeps only the "installed data" capability: it can never sign an update again.
+key keeps the "installed data" and "permission" capabilities (Android refuses the
+update otherwise: AndroidX declares a signature permission owned by the old key)
+and can never sign an update again (no rollback capability). Once every phone runs
+a rotated build, `-Action revoke` drops the legacy permission capability.
 
 Keys live outside the repository in %USERPROFILE%\.smart-pos-operator-signing.
 Back that folder up offline: without it, installed phones cannot receive updates.
@@ -13,7 +16,7 @@ Back that folder up offline: without it, installed phones cannot receive updates
   -Key ci       emulator-test key (never used for phones)
 #>
 param(
-    [Parameter(Mandatory)][ValidateSet('create', 'sign', 'verify')][string]$Action,
+    [Parameter(Mandatory)][ValidateSet('create', 'sign', 'verify', 'revoke')][string]$Action,
     [ValidateSet('release', 'ci')][string]$Key = 'release',
     [string]$InputApk,
     [string]$OutputApk,
@@ -77,9 +80,9 @@ if ($Action -eq 'create') {
         '-storepass:file', $passFile, '-keypass:file', $passFile) | Out-Null
     $raw = "$lineage.raw"
     Invoke-Tool $apksigner (@('rotate', '--out', $raw, '--old-signer') + $legacySigner + @('--new-signer') + $newSigner) | Out-Null
-    # The public legacy key may carry existing app data forward and nothing else.
+    # The public legacy key may carry app data and its own signature permissions forward, nothing else.
     Invoke-Tool $apksigner (@('lineage', '--in', $raw, '--out', $lineage, '--signer') + $legacySigner +
-        @('--set-installed-data', 'true', '--set-shared-uid', 'false', '--set-permission', 'false', '--set-rollback', 'false', '--set-auth', 'false')) | Out-Null
+        @('--set-installed-data', 'true', '--set-shared-uid', 'false', '--set-permission', 'true', '--set-rollback', 'false', '--set-auth', 'false')) | Out-Null
     Remove-Item -LiteralPath $raw
     Invoke-Tool $apksigner @('lineage', '--in', $lineage, '--print-certs', '-v')
     Write-Output "Created the $Key key in $keyDir (certificate SHA-256 $(Get-KeyDigest))."
@@ -89,6 +92,15 @@ if ($Action -eq 'create') {
 
 if (-not (Test-Path -LiteralPath $store) -or -not (Test-Path -LiteralPath $lineage)) {
     throw "Missing the $Key key. Run: scripts/operator-signing.ps1 -Action create -Key $Key"
+}
+
+if ($Action -eq 'revoke') {
+    # Only after every phone has installed a rotated build: later releases no longer trust the public key for permissions.
+    $revoked = "$lineage.revoked"
+    Invoke-Tool $apksigner (@('lineage', '--in', $lineage, '--out', $revoked, '--signer') + $legacySigner + @('--set-permission', 'false')) | Out-Null
+    Move-Item -LiteralPath $revoked -Destination $lineage -Force
+    Invoke-Tool $apksigner @('lineage', '--in', $lineage, '--print-certs')
+    exit 0
 }
 if (-not $InputApk -or -not (Test-Path -LiteralPath $InputApk)) { throw 'Pass -InputApk with an existing APK.' }
 

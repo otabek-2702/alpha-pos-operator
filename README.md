@@ -101,7 +101,11 @@ build in `dist/release-<version>/`.
 **Signing.** Up to 2.0.1 the APK was signed with the public React Native
 template debug key. From 2.1.0 it is signed with a private key plus an APK
 Signature Scheme v3 rotation lineage, so phones updated in place and keep their
-data; the legacy key can no longer sign updates. Keys are created once with
+data; the legacy key can no longer sign updates. It keeps the lineage
+"permission" capability (Android rejects the update otherwise, because AndroidX
+declares a signature permission owned by the old key). After every phone runs a
+rotated build, run `scripts/operator-signing.ps1 -Action revoke` before the next
+release to drop it. Keys are created once with
 `scripts/operator-signing.ps1 -Action create -Key release` and live in
 `%USERPROFILE%\.smart-pos-operator-signing`. **Back that folder up offline** —
 without it no installed phone can be updated again. The `ci` key is for emulator
