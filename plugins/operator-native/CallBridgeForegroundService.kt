@@ -94,6 +94,7 @@ class CallBridgeForegroundService : Service() {
     startForegroundNotification()
     history = OperatorCallHistory(this)
     updater = OperatorUpdater(this)
+    OperatorUpdater.finishIfInstalled(this)
     OperatorRuntimeStore.began(this)
     wakeLock = (getSystemService(POWER_SERVICE) as PowerManager).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:operator").apply {
       setReferenceCounted(false)

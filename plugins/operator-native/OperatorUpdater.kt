@@ -71,7 +71,25 @@ class OperatorUpdater(private val context: Context) {
 
     fun requestCheck(context: Context) { prefs(context).edit().putBoolean("check_requested", true).commit() }
 
+    /**
+     * Records a finished self-update as soon as the new version runs; the installer's success
+     * broadcast rarely arrives because the old process is killed. Idempotent and lock-free, so
+     * status reads never wait behind a download.
+     */
+    fun finishIfInstalled(context: Context) {
+      val p = prefs(context)
+      val pending = p.getLong("pending_code", 0L)
+      if (pending <= 0L) return
+      val (code, name) = installedVersion(context)
+      if (code < pending) return
+      p.edit().remove("pending_code").putString("state", "idle").remove("error").putInt("failures", 0)
+        .putString("report_text", "✅ Smart POS Operator avtomatik yangilandi: $name versiyasi o'rnatildi.").commit()
+      File(context.filesDir, "updates").listFiles()?.forEach { it.delete() }
+      (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(NOTIFICATION)
+    }
+
     fun status(context: Context): JSONObject {
+      finishIfInstalled(context)
       val p = prefs(context)
       val (code, name) = installedVersion(context)
       return JSONObject().put("installedCode", code).put("installedName", name).put("state", state(context))
@@ -149,7 +167,7 @@ class OperatorUpdater(private val context: Context) {
     val p = prefs(context)
     val now = System.currentTimeMillis()
     val (installedCode, _) = installedVersion(context)
-    reportOutcome(installedCode, telegram)
+    reportOutcome(telegram)
     if (state(context) == "installing") {
       if (now - p.getLong("install_started", 0L) < OperatorUpdatePolicy.INSTALL_TIMEOUT_MS) return@synchronized
       fail(context, "Yangilanish o'rnatilmadi; qayta uriniladi", report = true)
@@ -294,17 +312,9 @@ class OperatorUpdater(private val context: Context) {
   }
 
   /** Reports a finished or failed update to the report group; retried until Telegram accepts it. */
-  private fun reportOutcome(installedCode: Long, telegram: JSONObject) {
+  private fun reportOutcome(telegram: JSONObject) {
     val p = prefs(context)
-    val pending = p.getLong("pending_code", 0L)
-    if (pending > 0 && installedCode >= pending) {
-      val (_, name) = installedVersion(context)
-      p.edit().remove("pending_code").putString("state", "idle").remove("error").putInt("failures", 0)
-        .putString("report_text", "✅ Smart POS Operator avtomatik yangilandi: $name versiyasi o'rnatildi.").commit()
-      cleanup(keep = null)
-      val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-      manager.cancel(NOTIFICATION)
-    }
+    finishIfInstalled(context)
     val text = p.getString("report_text", null) ?: return
     val chat = telegram.optString("statsChatId").ifBlank { telegram.optString("chatId") }
     val token = telegram.optString("botToken")
