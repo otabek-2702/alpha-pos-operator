@@ -217,6 +217,8 @@ try:
     assert adb("shell", "getprop", "ro.kernel.qemu").strip() == "1", "Emulator required"
     adb("shell", "wm", "size", "720x1280")
     adb("shell", "wm", "density", "320")
+    # Missed-call reminders are heads-up notifications; they must not cover the app's header during taps.
+    adb("shell", "settings", "put", "global", "heads_up_notifications_enabled", "0")
     adb("shell", "pm", "clear", APP)
     scenario("setup")
     for permission in ["READ_PHONE_STATE", "READ_CALL_LOG", "CAMERA", "POST_NOTIFICATIONS"]:

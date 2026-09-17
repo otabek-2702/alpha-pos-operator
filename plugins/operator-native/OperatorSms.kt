@@ -99,14 +99,17 @@ object OperatorCallbackReminder {
     if (Build.VERSION.SDK_INT >= 26) manager.createNotificationChannel(NotificationChannel(CHANNEL, "Qayta qo‘ng‘iroq eslatmalari", NotificationManager.IMPORTANCE_HIGH))
     val number = OperatorReports.smsPhone(call.phone)
     val canCall = ContextCompat.checkSelfPermission(context, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
-    val dial = Intent(if (canCall) Intent.ACTION_CALL else Intent.ACTION_DIAL, Uri.parse("tel:$number")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    val pending = PendingIntent.getActivity(context, id(call.id), dial, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    fun intent(action: String) = Intent(action, Uri.parse("tel:$number")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    // Touching the notification only opens the dialer; only the explicit button places the call.
+    val open = PendingIntent.getActivity(context, id(call.id), intent(Intent.ACTION_DIAL), flags)
+    val callNow = PendingIntent.getActivity(context, id(call.id) + 1, intent(if (canCall) Intent.ACTION_CALL else Intent.ACTION_DIAL), flags)
     val title = "Javobsiz qo‘ng‘iroq: ${OperatorReports.phone(call.phone)}"
-    val text = (call.customerName?.takeIf { it.isNotBlank() }?.let { "$it · " } ?: "") + "${OperatorSchedule.clock(call.startedAt, tz)} · qayta qo‘ng‘iroq qiling"
+    val text = (OperatorReports.displayName(call)?.let { "$it · " } ?: "") + "${OperatorSchedule.clock(call.startedAt, tz)} · qayta qo‘ng‘iroq qiling"
     manager.notify(id(call.id), NotificationCompat.Builder(context, CHANNEL).setSmallIcon(context.applicationInfo.icon)
       .setContentTitle(title).setContentText(text).setPriority(NotificationCompat.PRIORITY_HIGH)
-      .setCategory(NotificationCompat.CATEGORY_CALL).setContentIntent(pending).setAutoCancel(true)
-      .addAction(0, "Qo‘ng‘iroq qilish", pending).build())
+      .setCategory(NotificationCompat.CATEGORY_CALL).setContentIntent(open).setAutoCancel(true)
+      .addAction(0, "Qo‘ng‘iroq qilish", callNow).build())
   }
 
   fun cancel(context: Context, callId: String) {
