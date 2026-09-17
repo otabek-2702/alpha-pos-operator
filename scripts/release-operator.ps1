@@ -12,6 +12,8 @@ param(
     [string]$Notes = '',
     [string]$Architectures = 'arm64-v8a,armeabi-v7a',
     [ValidateSet('release', 'ci')][string]$Key = 'release',
+    # Publish the APK already built, signed and tested in dist\release-<version>.
+    [switch]$SkipBuild,
     [switch]$Publish
 )
 
@@ -30,21 +32,26 @@ function Invoke-Checked([string]$File, [string[]]$Arguments) {
 
 Push-Location -LiteralPath $projectRoot
 try {
-    # 1. Version (app.json drives the native versionName/versionCode).
-    $current = [int](node -p "require('./app.json').expo.android.versionCode")
-    if ($versionCode -lt $current) { throw "Version $Version ($versionCode) is older than the app's current versionCode $current." }
-    Invoke-Checked node @('-e', "const fs=require('fs');const j=JSON.parse(fs.readFileSync('app.json','utf8'));j.expo.version=process.argv[1];j.expo.android.versionCode=Number(process.argv[2]);fs.writeFileSync('app.json',JSON.stringify(j,null,2)+'\n')", $Version, "$versionCode")
-    Invoke-Checked npm.cmd @('version', $Version, '--no-git-tag-version', '--allow-same-version', '--ignore-scripts')
-
-    # 2. Build (debug-key signed by Gradle) and 3. re-sign with the rotation lineage.
-    Invoke-Checked powershell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts\build-apk.ps1', '-Architectures', $Architectures)
     $suffix = if ($Key -eq 'ci') { '-ci' } else { '' }
     $outDir = Join-Path $projectRoot "dist\release-$Version$suffix"
-    New-Item -ItemType Directory -Path $outDir -Force | Out-Null
     $apkName = "operator-$Version.apk"
     $apk = Join-Path $outDir $apkName
-    Invoke-Checked powershell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts\operator-signing.ps1', '-Action', 'sign', '-Key', $Key,
-        '-InputApk', 'android\app\build\outputs\apk\release\app-release.apk', '-OutputApk', $apk)
+    if ($SkipBuild) {
+        if (-not (Test-Path -LiteralPath $apk)) { throw "No built APK at $apk." }
+        Invoke-Checked powershell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts\operator-signing.ps1', '-Action', 'verify', '-Key', $Key, '-InputApk', $apk)
+    } else {
+        # 1. Version (app.json drives the native versionName/versionCode).
+        $current = [int](node -p "require('./app.json').expo.android.versionCode")
+        if ($versionCode -lt $current) { throw "Version $Version ($versionCode) is older than the app's current versionCode $current." }
+        Invoke-Checked node @('-e', "const fs=require('fs');const j=JSON.parse(fs.readFileSync('app.json','utf8'));j.expo.version=process.argv[1];j.expo.android.versionCode=Number(process.argv[2]);fs.writeFileSync('app.json',JSON.stringify(j,null,2)+'\n')", $Version, "$versionCode")
+        Invoke-Checked npm.cmd @('version', $Version, '--no-git-tag-version', '--allow-same-version', '--ignore-scripts')
+
+        # 2. Build (debug-key signed by Gradle) and 3. re-sign with the rotation lineage.
+        Invoke-Checked powershell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts\build-apk.ps1', '-Architectures', $Architectures)
+        New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+        Invoke-Checked powershell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts\operator-signing.ps1', '-Action', 'sign', '-Key', $Key,
+            '-InputApk', 'android\app\build\outputs\apk\release\app-release.apk', '-OutputApk', $apk)
+    }
 
     # 4. Package identity and version as Android will see them.
     $sdk = if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { Join-Path $env:LOCALAPPDATA 'Android\Sdk' }
