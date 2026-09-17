@@ -34,14 +34,22 @@ credentials may need one initial rescan.
   upgraded to supergroups are followed (`migrate_to_chat_id`).
 - **Call lifecycle** (`OperatorSupervisor.kt`, `OperatorReports.kt`): answered /
   missed / resolved / lost / closed-hours / blocked states with Uzbek hashtags.
-  No callback within 1 minute alerts the managers on duty (SMS + Telegram DM,
-  once per waiting client), 5 minutes marks the client lost. A callback in
-  progress postpones both.
+  No callback within 2 minutes of free phone time alerts the managers on duty
+  (SMS + Telegram DM, once per waiting client); 5 minutes marks the client
+  lost. Time spent on any call does not count.
 - **Shifts** (`OperatorSchedule.kt`): default 08:00–17:00 and 17:00–02:00; a
   pinned report after each shift; closed-hours callers can get one SMS per
   closed period (Uzbek mobiles only, daily cap). Managers rotate weekly from
   Sunday or keep a fixed shift and connect to the bot with a private
   `/start` link. Bot commands: `/holat`, `/hisobot`, `/raqam`.
+- **Owner bot commands** (`OperatorAdmin.kt`, 2.2.1): the Managers screen shares
+  a private owner link; that chat can view and change managers, groups,
+  closed-hours SMS and alert timings (`/sozlamalar`, `/menejer_qosh`, `/guruh`,
+  `/vaqt` …). App and bot writes both go through `OperatorConfigWriter`; the app
+  reloads the stored configuration when its revision changes.
+- **Recordings** are sent with `sendAudio` (Telegram's inline player, no
+  transcoding) as `+998…_yymmdd_hhmmss.m4a`, captioned with the managers on duty,
+  direction, length, order, `#ovozDDMMYY` and the caller with the contact name.
 - **Health alerts**: POS offline for 5 minutes during a shift, internet outage,
   low battery or unplugged charger, answered call without a recording.
 - **POS roles** (protocol 3): the phone sends `operator_hello` with the role and

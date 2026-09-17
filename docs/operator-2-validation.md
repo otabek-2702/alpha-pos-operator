@@ -103,6 +103,23 @@ revoked the same way before 2.2.0 is published).
 Not checked by automation: real Telegram delivery and pinning, real SMS,
 Samsung blocked-call log entries and the contact picker on the phone.
 
+## Operator 2.2.1 validation
+
+Branch `operator-2.2.1`, CI-key emulator APKs.
+
+- [Update path](https://github.com/otabek-2702/alpha-pos-operator/actions/runs/35217864432),
+  Android 13 and 15: 2.0.0 → 2.1.0 → self-update to 2.2.1, settings kept.
+- [Full UI and service suite](https://github.com/otabek-2702/alpha-pos-operator/actions/runs/35217867763),
+  Android 13 and 15, including owner bot commands against the encrypted store
+  (register, add/change/remove managers, timings, closed-hours SMS, group
+  switch only after the bot could post, new link disconnects old owners) and
+  recordings sent with Telegram's audio player (fake Bot API). The first run
+  showed the missed-call reminder (heads-up) covering the app header: the
+  reminder body now only opens the dialer and the UI driver disables heads-up
+  notifications.
+- JVM: 32 + 87 checks (idle-based alert timers, dated/manager tags, audio
+  captions, file names). TypeScript and 15 JavaScript tests passed.
+
 ## Physical Samsung check
 
 The user confirmed **Samsung SM-A037F/DS, Android 13, one active SIM**. The
