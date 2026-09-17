@@ -79,6 +79,30 @@ release build; the production APK is signed with the private release key).
 Not yet checked on the physical Samsung: the Samsung call-recording folder,
 the "Install unknown apps" grant and a real self-update from GitHub.
 
+## Operator 2.2.0 validation
+
+Branch `operator-2.2`, emulator APKs signed with the CI test key whose lineage
+has the legacy permission capability revoked (the production release lineage is
+revoked the same way before 2.2.0 is published).
+
+- [Update path](https://github.com/otabek-2702/alpha-pos-operator/actions/runs/35189525154),
+  Android 13 and 15: 2.0.0 (legacy key) → 2.1.0 (rotated key) → self-update to
+  2.2.0 with the revoked lineage, no user interaction, service restarted,
+  POS settings kept, call database migrated to v3. `SEND_SMS` (hard-restricted,
+  new in 2.2.0) is `RESTRICTION_INSTALLER_EXEMPT` after the self-update, so it
+  can be granted in the app without a manual reinstall.
+- [Full UI and service suite](https://github.com/otabek-2702/alpha-pos-operator/actions/runs/35189891524),
+  Android 13 and 15: everything from 2.1.0 plus operator/cashier POS roles (cashier POS gets `call_state` but no legacy popup
+  frame), client-recall and callback-attempt resolution, order links, and the
+  Telegram outbox against a fake Bot API (backup mirroring, edits, deleted
+  message re-send, file_id reuse, group upgrade, refused chats not blocking
+  others, in-flight revisions becoming edits).
+- JVM checks: 32 recording/update + 73 schedule/report checks. TypeScript and
+  15 JavaScript tests passed. APK privacy audit passed.
+
+Not checked by automation: real Telegram delivery and pinning, real SMS,
+Samsung blocked-call log entries and the contact picker on the phone.
+
 ## Physical Samsung check
 
 The user confirmed **Samsung SM-A037F/DS, Android 13, one active SIM**. The
