@@ -26,6 +26,31 @@ UDP discovery to recover changed LAN addresses. The POS app must be running,
 and both devices need a reachable local network. An upgrade from old rotating
 credentials may need one initial rescan.
 
+## Operator 2.2: reports, shifts, managers and POS roles
+
+- **Telegram outbox** (`OperatorTelegram.kt`): one durable row per message and
+  chat. A new call revision edits the sent message; deleted messages are sent
+  again; every message is mirrored to the optional backup group; basic groups
+  upgraded to supergroups are followed (`migrate_to_chat_id`).
+- **Call lifecycle** (`OperatorSupervisor.kt`, `OperatorReports.kt`): answered /
+  missed / resolved / lost / closed-hours / blocked states with Uzbek hashtags.
+  No callback within 1 minute alerts the managers on duty (SMS + Telegram DM,
+  once per waiting client), 5 minutes marks the client lost. A callback in
+  progress postpones both.
+- **Shifts** (`OperatorSchedule.kt`): default 08:00–17:00 and 17:00–02:00; a
+  pinned report after each shift; closed-hours callers can get one SMS per
+  closed period (Uzbek mobiles only, daily cap). Managers rotate weekly from
+  Sunday or keep a fixed shift and connect to the bot with a private
+  `/start` link. Bot commands: `/holat`, `/hisobot`, `/raqam`.
+- **Health alerts**: POS offline for 5 minutes during a shift, internet outage,
+  low battery or unplugged charger, answered call without a recording.
+- **POS roles** (protocol 3): the phone sends `operator_hello` with the role and
+  `call_state` snapshots (current + recent calls). Operator POS opens the call
+  dialog only when no order is being entered; cashier POS never opens it; both
+  offer quick-fill caller chips. POS 0.0.17+ sends `order_created` back so calls
+  link to orders. 2.1 phones and older desktops keep the legacy
+  `call_start`/`call_end` frames.
+
 ## Background operation and records
 
 The Android foreground service owns call detection, sockets, reconnects, file
@@ -105,7 +130,7 @@ data; the legacy key can no longer sign updates. It keeps the lineage
 "permission" capability (Android rejects the update otherwise, because AndroidX
 declares a signature permission owned by the old key). After every phone runs a
 rotated build, run `scripts/operator-signing.ps1 -Action revoke` before the next
-release to drop it. Keys are created once with
+release to drop it (done for 2.2.0; phones still on 2.0.x must reinstall). Keys are created once with
 `scripts/operator-signing.ps1 -Action create -Key release` and live in
 `%USERPROFILE%\.smart-pos-operator-signing`. **Back that folder up offline** —
 without it no installed phone can be updated again. The `ci` key is for emulator

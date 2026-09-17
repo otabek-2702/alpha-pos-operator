@@ -238,11 +238,13 @@ class OperatorRuntimeInstrumentation : Instrumentation() {
       reconcile()
       fun recallMissed() = ledger.pendingRecords("pos-a").single { it.optString("phone") == recallPhone && it.optString("outcome") == "missed" }
       check(recallMissed().optInt("callbackAttempts") == 1 && recallMissed().isNull("resolvedAt")) { "An unanswered callback is only an attempt" }
-      check(OperatorReports.status(OperatorCallHistory.view(recallMissed())) == OperatorCallStatus.CALLED_BACK_NO_ANSWER)
+      // The emulator clock may fall into closed hours (02:00-08:00), where every missed call is reported as closed.
+      fun expected(open: OperatorCallStatus) = if (recallMissed().optBoolean("closed")) OperatorCallStatus.CLOSED else open
+      check(OperatorReports.status(OperatorCallHistory.view(recallMissed())) == expected(OperatorCallStatus.CALLED_BACK_NO_ANSWER))
       addLog(recallPhone, recallMissedAt + 10, 42, CallLog.Calls.INCOMING_TYPE)
       reconcile()
       check(recallMissed().optString("resolvedBy") == "client" && recallMissed().optLong("resolvedTalkSeconds") == 42L) { "The client's own answered call resolves the missed call" }
-      check(OperatorReports.status(OperatorCallHistory.view(recallMissed())) == OperatorCallStatus.RESOLVED)
+      check(OperatorReports.status(OperatorCallHistory.view(recallMissed())) == expected(OperatorCallStatus.RESOLVED))
       check(recallMissed().has("shiftId") && recallMissed().has("closed")) { "Calls are annotated with shift or closed hours" }
       val stableRevision = recallMissed().getLong("revision")
       reconcile()
