@@ -11,7 +11,9 @@ import java.util.TimeZone
 /** Live facts from the foreground service for alerts and /holat. */
 data class OperatorPeerHealth(val id: String, val name: String, val connected: Boolean, val role: String)
 
-data class OperatorEnvironment(val callActive: Boolean, val peers: List<OperatorPeerHealth>, val networkUp: Boolean, val appVersion: String)
+data class OperatorEnvironment(val callActive: Boolean, val peers: List<OperatorPeerHealth>, val networkUp: Boolean, val appVersion: String,
+  /** When the last call on the phone ended (0 = none since the service started). */
+  val lastCallEndedAt: Long = 0L)
 
 data class OperatorManager(val id: String, val name: String, val phone: String, val schedule: OperatorManagerSchedule,
   val invite: String, val sms: Boolean, val telegram: Boolean)
@@ -28,13 +30,15 @@ class OperatorSettings(val config: JSONObject, private val overrides: Map<String
   val reportsEnabled = telegram.optBoolean("sendCallStats") && token.isNotBlank() && statsChat.isNotBlank()
   val shifts: List<OperatorShift> = parseShifts(config.optJSONArray("shifts"))
   private val alerts = config.optJSONObject("alerts") ?: JSONObject()
-  val managerAlertMs = alerts.optInt("managerAfterMinutes", 1).coerceIn(1, 60) * 60_000L
+  val managerAlertMs = alerts.optInt("managerAfterMinutes", 2).coerceIn(1, 60) * 60_000L
   val lostMs = alerts.optInt("lostAfterMinutes", 5).coerceIn(1, 240) * 60_000L
   val smsCap = alerts.optInt("smsDailyCap", 50).coerceIn(0, 500)
   private val closed = config.optJSONObject("closedSms") ?: JSONObject()
   val closedSmsEnabled = closed.optBoolean("enabled", false)
   val closedSmsText: String = closed.optString("text").trim().ifBlank { DEFAULT_CLOSED_SMS }
   val managers: List<OperatorManager> = parseManagers(config.optJSONArray("managers"))
+  /** Owner link code for remote settings through the bot. */
+  val adminInvite: String = config.optString("adminInvite")
 
   companion object {
     const val DEFAULT_CLOSED_SMS = "Smart Food kafesi hozir ishlamayapti. Ish vaqtimiz: har kuni 08:00 dan 02:00 gacha. Qo'ng'iroq qilganingiz uchun rahmat!"
@@ -77,7 +81,11 @@ class OperatorSupervisor(private val context: Context, private val history: Oper
   OperatorTelegram.Listener {
   val telegram = OperatorTelegram(context).also { it.listener = this }
   val sms = OperatorSms(context)
+  private val contacts = OperatorContacts(context)
   private val bot = OperatorTelegram.HttpTransport()
+  /** Called after an owner changed the configuration through the bot. */
+  @Volatile var configChanged: (() -> Unit)? = null
+  private val admin = OperatorAdmin(context, bot, { managerChats() }, { configChanged?.invoke() })
   private val prefs = context.getSharedPreferences("operator_supervisor_v1", Context.MODE_PRIVATE)
   private val tz: TimeZone get() = TimeZone.getDefault()
   @Volatile private var environment = OperatorEnvironment(false, emptyList(), true, "")
@@ -110,7 +118,9 @@ class OperatorSupervisor(private val context: Context, private val history: Oper
     for (key in o.keys().asSequence().toList()) if (o.optString(key) == from) o.put(key, to)
     o.put(from, to)
     // Written before the next post: later rows must use the new chat ID.
-    prefs.edit().putString("chat_overrides", o.toString()).commit()
+    val edit = prefs.edit().putString("chat_overrides", o.toString())
+    if (prefs.getString("recordings_chat", "") == from) edit.putString("recordings_chat", to)
+    edit.commit()
   }
 
   override fun delivered(key: String, chat: String, messageId: Long) {
@@ -147,6 +157,12 @@ class OperatorSupervisor(private val context: Context, private val history: Oper
 
   private fun onDuty(s: OperatorSettings, slot: OperatorShiftSlot): List<OperatorManager> =
     s.managers.filter { OperatorSchedule.isOnDuty(it.schedule, slot, s.shifts, tz) }
+
+  private fun managerNames(s: OperatorSettings, at: Long): List<String> = onDuty(s, at).map { it.name }.filter { it.isNotBlank() }
+
+  /** Adds the name saved in the phone's contacts (if the app may read them). */
+  private fun named(view: OperatorCallView): OperatorCallView =
+    contacts.name(view.phone)?.let { view.copy(contactName = it) } ?: view
 
   private fun managerTelegram(managers: List<OperatorManager>): List<String> {
     val chats = managerChats()
@@ -195,7 +211,8 @@ class OperatorSupervisor(private val context: Context, private val history: Oper
         val revision = record.optLong("revision")
         // A late change to an old call (for example a customer name) is not posted again as a new message.
         if (now - view.startedAt < 20 * OperatorSchedule.DAY_MS) {
-          telegram.post("call:${view.id}", reportChats(s, view.startedAt), OperatorReports.callHtml(view, tz, s.lostMs), revision)
+          val managers = if (view.closed) emptyList() else managerNames(s, view.startedAt)
+          telegram.post("call:${view.id}", reportChats(s, view.startedAt), OperatorReports.callHtml(named(view), tz, s.lostMs, managers), revision)
         }
         history.markReported(view.id, revision)
       }
@@ -208,8 +225,9 @@ class OperatorSupervisor(private val context: Context, private val history: Oper
   private fun lifecycle(s: OperatorSettings, now: Long) {
     val since = maxOf(prefs.getLong("lifecycle_since", now), now - 12 * 3_600_000L)
     val missed = history.recentMissed(since).map { OperatorCallHistory.view(it) }
-    // A call in progress may be the callback (its number is known only after it ends) or the client calling again.
-    val open = if (environment.callActive) history.openCalls() else emptyList()
+    val env = environment
+    // Timers run only while the phone is free: they start when the last call (missed or not) ended.
+    val quietSince = env.lastCallEndedAt
     // One alert per waiting client: redials of the same number do not alert again.
     val alerted = missed.filter { it.resolvedAt == null && it.managerAlertAt != null }.map { numberKey(it.phone) }.toMutableSet()
     val lost = missed.filter { it.resolvedAt == null && it.lostAt != null }.map { numberKey(it.phone) }.toMutableSet()
@@ -218,29 +236,32 @@ class OperatorSupervisor(private val context: Context, private val history: Oper
       if (view.closed) { closedSms(s, view, now); continue }
       val number = numberKey(view.phone)
       if (number.isEmpty()) continue   // A hidden number cannot be called back.
-      if (open.any { it.started >= view.startedAt && (it.direction == "out" || numberKey(it.phone) == number) }) continue
+      if (env.callActive) continue   // The operator is talking (maybe calling this client back).
       val missedAt = OperatorReports.missedAt(view)
-      if (OperatorReports.needsManagerAlert(view, now, s.managerAlertMs)) {
+      val freeAt = maxOf(missedAt, quietSince)
+      if (OperatorReports.needsManagerAlert(view, now, s.managerAlertMs, quietSince)) {
         history.update(view.id) { it.put("managerAlertAt", now) }
         // After downtime, calls that are already stale are only marked, never alerted in a burst.
-        if (number !in alerted && now - missedAt < maxOf(s.lostMs, s.managerAlertMs + 120_000L)) {
+        if (number !in alerted && now - freeAt < maxOf(s.lostMs, s.managerAlertMs + 120_000L)) {
           alerted.add(number)
-          OperatorCallbackReminder.show(context, view, tz)
+          val shown = named(view)
+          OperatorCallbackReminder.show(context, shown, tz)
           val duty = onDuty(s, view.startedAt)
-          telegram.post("alert:${view.id}", managerTelegram(duty), OperatorReports.managerAlertHtml(view, tz), 1, editable = false)
+          val minutes = s.managerAlertMs / 60_000
+          telegram.post("alert:${view.id}", managerTelegram(duty), OperatorReports.managerAlertHtml(shown, tz, minutes, duty.map { it.name }), 1, editable = false)
           val shift = OperatorSchedule.slotAt(view.startedAt, s.shifts, tz)?.id ?: OperatorSchedule.dateTag(view.startedAt, tz)
           for (manager in duty.filter { it.sms && it.phone.isNotBlank() }) {
             // At most one SMS per client, shift and manager.
-            sms.send("alert:$shift:$number:${manager.id}", OperatorReports.smsPhone(manager.phone), OperatorReports.managerAlertSms(view, tz), s.smsCap, tz)
+            sms.send("alert:$shift:$number:${manager.id}", OperatorReports.smsPhone(manager.phone), OperatorReports.managerAlertSms(shown, tz, minutes), s.smsCap, tz)
           }
         }
       }
-      if (OperatorReports.becomesLost(view, now, s.lostMs)) {
-        val lostAt = minOf(now, missedAt + s.lostMs)
+      if (OperatorReports.becomesLost(view, now, s.lostMs, quietSince)) {
+        val lostAt = minOf(now, freeAt + s.lostMs)
         history.update(view.id) { it.put("lostAt", lostAt) }
-        if (number !in lost && now - missedAt < s.lostMs + 15 * 60_000L) {
+        if (number !in lost && now - freeAt < s.lostMs + 15 * 60_000L) {
           lost.add(number)
-          val text = OperatorReports.lostAlertHtml(view.copy(lostAt = lostAt), tz, s.lostMs)
+          val text = OperatorReports.lostAlertHtml(named(view).copy(lostAt = lostAt), tz, s.lostMs, managerNames(s, view.startedAt))
           telegram.post("lost:${view.id}", reportChats(s, view.startedAt), text, 1, replyToKey = "call:${view.id}", editable = false)
           telegram.post("lost:${view.id}", managerTelegram(onDuty(s, view.startedAt)), text, 1, editable = false)
         }
@@ -264,9 +285,14 @@ class OperatorSupervisor(private val context: Context, private val history: Oper
       val at = stamped ?: file.modified.takeIf { it > 0 } ?: now
       val call = history.findForRecording(phone, at)
       if (call != null) audio.put(call.getString("id"), now)
-      val view = call?.let { OperatorCallHistory.view(it) }
-      telegram.postDocument("rec:${file.uri}", audioChats(s, now), file.uri, file.name, file.size,
-        OperatorReports.recordingCaptionHtml(file.name, at, view, tz))
+      val view = call?.let { named(OperatorCallHistory.view(it)) }
+      val callAt = view?.startedAt ?: at
+      val caption = OperatorReports.recordingCaptionHtml(file.name, at, view, tz, managerNames(s, callAt), phone)
+      val uploadName = OperatorReports.recordingFileName(file.name, view?.phone?.takeIf { it.isNotBlank() } ?: phone)
+      val audioPlayer = OperatorReports.isPlayableAudio(file.name)
+      val (title, performer) = OperatorReports.recordingPlayerTitle(file.name, at, view, tz, phone)
+      telegram.postDocument("rec:${file.uri}", audioChats(s, now), file.uri, uploadName, file.size, caption,
+        audio = audioPlayer, title = title, performer = performer)
       recordings.markQueued(s.telegram, file.uri)
     }
     val trimmed = JSONObject()
@@ -459,21 +485,30 @@ class OperatorSupervisor(private val context: Context, private val history: Oper
     val command = word.substringBefore('@').lowercase()
     val argument = text.substringAfter(' ', "").trim()
     val replyKey = "cmd:$chatId:${message.optLong("message_id")}"
-    if (command == "/start" && chat.optString("type") == "private") {
-      telegram.post(replyKey, listOf(chatId), register(s, chatId, argument), 1, editable = false)
+    val private = chat.optString("type") == "private"
+    if (command == "/start" && private) {
+      val reply = admin.register(s, chatId, argument) ?: register(s, chatId, argument)
+      telegram.post(replyKey, listOf(chatId), reply, 1, editable = false)
       return
+    }
+    val owner = private && admin.isAdmin(s, chatId)
+    if (owner) {
+      admin.handle(s, command, argument)?.let { reply ->
+        telegram.post(replyKey, listOf(chatId), reply, 1, editable = false)
+        return
+      }
     }
     val managerIds = s.managers.map { it.id }.toSet()
     val allowed = setOf(s.statsChat, s.backupChat, s.recordingsChat).filter { it.isNotBlank() } +
       managerChats().filterKeys { it in managerIds }.values
-    if (chatId !in allowed) return
+    if (chatId !in allowed && !owner) return
     val reply = when (command) {
       "/holat" -> statusText(s)
       "/hisobot" -> OperatorSchedule.slotAt(System.currentTimeMillis(), s.shifts, tz)
         ?.let { OperatorReports.shiftReportHtml(summarize(s, it, System.currentTimeMillis()), tz) }
         ?: "⚪ Hozir smena yo‘q — kafe yopiq."
       "/raqam" -> numberText(argument)
-      "/start", "/yordam", "/help" -> HELP
+      "/start", "/yordam", "/help" -> if (owner) OperatorAdmin.HELP else HELP
       else -> return
     }
     telegram.post(replyKey, listOf(chatId), reply, 1, editable = false)

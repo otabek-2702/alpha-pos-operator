@@ -61,10 +61,27 @@ function Root() {
   const mutation = useRef<Promise<void>>(Promise.resolve());
   const updates = useAppUpdates(snapshot?.update ?? null);
 
+  const configRevision = useRef<number | null>(null);
   const refresh = useCallback(async () => {
     try {
-      setSnapshot(await getRuntimeSnapshot());
+      const next = await getRuntimeSnapshot();
+      setSnapshot(next);
       setRuntimeError('');
+      // Settings changed elsewhere (owner bot commands): show the stored version.
+      const revision = typeof next.configRevision === 'number' ? next.configRevision : null;
+      if (revision !== null && configRevision.current !== null && revision !== configRevision.current && configLoadedRef.current && !loadingConfigRef.current) {
+        configRevision.current = revision;
+        const operation = mutation.current.catch(() => {}).then(async () => {
+          const stored = await getOperatorConfiguration();
+          if (!mounted.current) return;
+          configRef.current = stored;
+          setConfig(stored);
+        });
+        mutation.current = operation;
+        void operation.catch(() => {});
+      } else if (revision !== null) {
+        configRevision.current = revision;
+      }
     } catch {
       setRuntimeError('Xizmat bilan aloqa yo‘q. Yangi APK o‘rnatilganini va ruxsatlarni tekshiring.');
     }
@@ -142,7 +159,7 @@ function Root() {
     let cancelled = false;
     const operation = mutation.current.catch(() => {}).then(async () => {
       if (cancelled || !configLoadedRef.current || loadingConfigRef.current) return;
-      await configureOperator(configRef.current);
+      await configureOperator(await getOperatorConfiguration());
       await refresh();
     });
     mutation.current = operation;
@@ -181,7 +198,8 @@ function Root() {
       if (!configLoadedRef.current || loadingConfigRef.current) throw new Error(CONFIG_LOAD_ERROR);
       let saved: OperatorConfiguration;
       try {
-        await configureOperator(change(configRef.current));
+        const current = await getOperatorConfiguration();
+        await configureOperator(change(current));
         saved = await getOperatorConfiguration();
       } catch (error) {
         // The write may have succeeded; block later writes based on a stale view.
@@ -223,6 +241,10 @@ function Root() {
 
   const handleManagersSave = async (managers: ManagerConfig[]) => {
     await save((previous) => ({ ...previous, managers }));
+  };
+
+  const handleAdminRenew = async () => {
+    await save((previous) => ({ ...previous, adminInvite: 'new' }));
   };
 
   const handleRemove = (id: string) => {
@@ -290,7 +312,7 @@ function Root() {
       onOpenPermissions={() => setPage('permissions')} onClose={() => setPage('home')} />;
   } else if (page === 'managers') {
     content = <ManagersScreen managers={config.managers ?? []} shifts={config.shifts ?? DEFAULT_SHIFTS} operations={snapshot?.operations ?? null}
-      onSave={handleManagersSave} onClose={() => setPage('home')} />;
+      onSave={handleManagersSave} adminInvite={config.adminInvite} onRenewAdmin={handleAdminRenew} onClose={() => setPage('home')} />;
   } else if (page === 'history') {
     content = <WorkHistoryScreen periods={snapshot?.periods ?? []} onClose={() => setPage('home')} />;
   } else if (page === 'support') {

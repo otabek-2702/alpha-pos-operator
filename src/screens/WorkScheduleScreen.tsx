@@ -142,7 +142,7 @@ export function WorkScheduleScreen({ shifts: savedShifts, closedSms, alerts, ope
 
           <Text style={styles.section}>Ogohlantirishlar</Text>
           <View style={styles.card}>
-            <Field label="Menejerga xabar (javobsiz qo‘ng‘iroqdan keyin, daqiqa)" value={managerAfter} onChange={(v) => { setManagerAfter(v); changed(); }} />
+            <Field label="Menejerga xabar (qo‘ng‘iroq tugab, telefon bo‘sh turgach, daqiqa)" value={managerAfter} onChange={(v) => { setManagerAfter(v); changed(); }} />
             <Field label="“Yo‘qotilgan mijoz” (daqiqa)" value={lostAfter} onChange={(v) => { setLostAfter(v); changed(); }} />
             <Field label="Kunlik SMS chegarasi" value={smsCap} onChange={(v) => { setSmsCap(v); changed(); }} />
           </View>

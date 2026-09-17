@@ -29,13 +29,14 @@ object OperatorTelegramChecks {
             else { onSend?.invoke(); ok(message()) }
           "editMessageText" -> if (editFails) OperatorTelegram.Response(400, JSONObject().put("ok", false).put("description", "Bad Request: message to edit not found"))
             else ok(message())
-          "sendDocument" -> ok(message(fileId = "FILE-1"))
+          "sendDocument", "sendAudio" -> ok(message(fileId = "FILE-1"))
           "pinChatMessage" -> ok(true)
           else -> OperatorTelegram.Response(404, JSONObject().put("ok", false))
         }
       }
-      override fun document(token: String, chat: String, name: String, size: Long, open: () -> InputStream, caption: String, html: Boolean): OperatorTelegram.Response {
-        calls.add("upload $chat $name")
+      override fun document(token: String, chat: String, name: String, size: Long, open: () -> InputStream, caption: String, html: Boolean,
+        audio: Boolean, title: String, performer: String): OperatorTelegram.Response {
+        calls.add("upload${if (audio) "-audio" else ""} $chat $name")
         return ok(message(fileId = "FILE-1"))
       }
     }
@@ -76,6 +77,14 @@ object OperatorTelegramChecks {
       drainAll()
       check(calls.count { it.startsWith("upload") } == 1 && calls.any { it == "upload -100main a.m4a" }) { "Audio is uploaded once: $calls" }
       check(calls.any { it.startsWith("sendDocument -100backup FILE-1") }) { "The backup reuses the uploaded file: $calls" }
+
+      calls.clear()
+      outbox.postDocument("rec:b", listOf("-100main", "-100backup"), "file:///nonexistent/b.m4a", "+998901234567_260917_153114.m4a", 10, "<b>ovoz</b>",
+        audio = true, title = "Aziz", performer = "+998901234567")
+      drainAll()
+      check(calls.any { it == "upload-audio -100main +998901234567_260917_153114.m4a" } && calls.any { it.startsWith("sendAudio -100backup") }) {
+        "Recordings use Telegram's audio player in both groups: $calls"
+      }
 
       calls.clear()
       outbox.post("alert:1", listOf("-7"), "ogohlantirish", 1)

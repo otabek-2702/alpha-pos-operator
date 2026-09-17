@@ -113,6 +113,8 @@ class CallBridgeForegroundService : Service() {
     startForegroundNotification()
     history = OperatorCallHistory(this)
     supervisor = OperatorSupervisor(this, history, recordings)
+    // Owner bot commands change the stored configuration; apply it like an app save.
+    supervisor.configChanged = { main.post { reload() } }
     updater = OperatorUpdater(this)
     OperatorUpdater.finishIfInstalled(this)
     OperatorRuntimeStore.began(this)
@@ -165,7 +167,7 @@ class CallBridgeForegroundService : Service() {
       val current = config
       val shifts = OperatorSettings.parseShifts(current.optJSONArray("shifts"))
       history.tick(shifts, TimeZone.getDefault())
-      supervisor.tick(current, OperatorEnvironment(callInProgress, peerHealth, networkUp, appVersion()))
+      supervisor.tick(current, OperatorEnvironment(callInProgress, peerHealth, networkUp, appVersion(), lastCallEndedAt))
       main.post { if (!destroyed) peers.values.filter { it.status == "connected" }.forEach { sendCallRecords(it) } }
     } catch (_: Exception) { OperatorRuntimeStore.setError(this, "Qo'ng'iroqlar hisobotini yangilab bo'lmadi; ruxsatlarni tekshiring") }
   }

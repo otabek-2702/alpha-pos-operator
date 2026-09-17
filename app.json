@@ -3,7 +3,7 @@
     "name": "Operator",
     "slug": "alphapos-operator-link",
     "scheme": "alphaposlink",
-    "version": "2.2.0",
+    "version": "2.2.1",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "icon": "./assets/icon.png",
@@ -22,7 +22,7 @@
     ],
     "android": {
       "package": "com.alphapos.operatorlink",
-      "versionCode": 20200,
+      "versionCode": 20201,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-foreground.png",
         "backgroundImage": "./assets/adaptive-background.png",
@@ -43,7 +43,8 @@
         "android.permission.WAKE_LOCK",
         "android.permission.REQUEST_INSTALL_PACKAGES",
         "android.permission.SEND_SMS",
-        "android.permission.CALL_PHONE"
+        "android.permission.CALL_PHONE",
+        "android.permission.READ_CONTACTS"
       ]
     },
     "ios": {

@@ -36,7 +36,8 @@ class OperatorTelegram(
 
   interface Transport {
     fun json(token: String, method: String, body: JSONObject): Response
-    fun document(token: String, chat: String, name: String, size: Long, open: () -> InputStream, caption: String, html: Boolean): Response
+    fun document(token: String, chat: String, name: String, size: Long, open: () -> InputStream, caption: String, html: Boolean,
+      audio: Boolean = false, title: String = "", performer: String = ""): Response
     fun cancel() {}
   }
 
@@ -62,10 +63,15 @@ class OperatorTelegram(
     for (chat in chats.map { it.trim() }.filter { it.isNotEmpty() }.distinct()) upsert(key, chat, "text", payload, revision, null)
   }
 
-  /** The first chat uploads the file; the others reuse its Telegram file_id (or upload if it keeps failing). */
-  @Synchronized fun postDocument(key: String, chats: List<String>, uri: String, name: String, size: Long, caption: String, revision: Long = 1) {
+  /**
+   * The first chat uploads the file; the others reuse its Telegram file_id (or upload if it keeps failing).
+   * [audio] sends MP3/M4A with Telegram's audio player instead of as a plain file.
+   */
+  @Synchronized fun postDocument(key: String, chats: List<String>, uri: String, name: String, size: Long, caption: String, revision: Long = 1,
+    audio: Boolean = false, title: String = "", performer: String = "") {
     val targets = chats.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
     val payload = JSONObject().put("uri", uri).put("name", name).put("size", size).put("text", caption)
+      .put("method", if (audio) "audio" else "document").put("title", title).put("performer", performer)
     targets.forEachIndexed { index, chat -> upsert(key, chat, "document", payload, revision, if (index == 0) null else targets[0]) }
   }
 
@@ -164,7 +170,8 @@ class OperatorTelegram(
         } else {
           val primaryFile = row.primary?.let { primaryState(row.key, it) }
           if (primaryFile?.fileId != null) {
-            response = transport.json(token, "sendDocument", captionBody(row).put("document", primaryFile.fileId))
+            response = if (isAudio(row)) transport.json(token, "sendAudio", audioFields(row, captionBody(row).put("audio", primaryFile.fileId)))
+              else transport.json(token, "sendDocument", captionBody(row).put("document", primaryFile.fileId))
           } else if (primaryFile != null && !primaryFile.sent && primaryFile.attempts < 3) {
             defer(row, 15, null)   // Wait for the main chat's upload, then reuse its file.
             return false
@@ -206,6 +213,14 @@ class OperatorTelegram(
     return body
   }
 
+  private fun isAudio(row: Row) = row.payload.optString("method") == "audio"
+
+  private fun audioFields(row: Row, body: JSONObject): JSONObject {
+    row.payload.optString("title").takeIf { it.isNotBlank() }?.let { body.put("title", it) }
+    row.payload.optString("performer").takeIf { it.isNotBlank() }?.let { body.put("performer", it) }
+    return body
+  }
+
   private fun captionBody(row: Row): JSONObject {
     val body = JSONObject().put("chat_id", row.chat).put("caption", text(row))
     if (!plain(row)) body.put("parse_mode", "HTML")
@@ -218,7 +233,8 @@ class OperatorTelegram(
     val open: () -> InputStream = {
       if (local != null) FileInputStream(local) else context.contentResolver.openInputStream(uri) ?: throw IOException("recording unavailable")
     }
-    return transport.document(token, row.chat, row.payload.getString("name"), row.payload.optLong("size", -1L), open, text(row), !plain(row))
+    return transport.document(token, row.chat, row.payload.getString("name"), row.payload.optLong("size", -1L), open, text(row), !plain(row),
+      isAudio(row), row.payload.optString("title"), row.payload.optString("performer"))
   }
 
   private data class PrimaryFile(val fileId: String?, val attempts: Int, val sent: Boolean)
@@ -262,6 +278,12 @@ class OperatorTelegram(
       description.contains("can't parse entities") && !plain(row) -> synchronized(this) {
         writableDatabase.update("outbox", ContentValues().apply { put("payload", row.payload.put("plain", true).toString()); put("due", 0) },
           "key=? AND chat=?", arrayOf(row.key, row.chat))
+      }
+      // A file Telegram does not accept as audio is sent again as a plain document (this chat and its mirrors).
+      isAudio(row) && row.messageId == null && response.code == 400 &&
+        listOf("file", "audio", "type").any { description.contains(it, ignoreCase = true) } -> synchronized(this) {
+        writableDatabase.update("outbox", ContentValues().apply { put("payload", JSONObject(row.payload.toString()).put("method", "document").toString()); put("due", 0) },
+          "key=? AND (chat=? OR primary_chat=?)", arrayOf(row.key, row.chat, row.chat))
       }
       response.code == 429 -> defer(row, parameters?.optLong("retry_after", 30L) ?: 30L, null)
       response.code == 401 || response.code == 403 || response.code == 400 ->
@@ -310,19 +332,28 @@ class OperatorTelegram(
       .url("https://api.telegram.org/bot$token/$method")
       .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType())).build())
 
-    override fun document(token: String, chat: String, name: String, size: Long, open: () -> InputStream, caption: String, html: Boolean): Response {
+    override fun document(token: String, chat: String, name: String, size: Long, open: () -> InputStream, caption: String, html: Boolean,
+      audio: Boolean, title: String, performer: String): Response {
       val file = object : RequestBody() {
         override fun contentType() = "application/octet-stream".toMediaType()
         override fun contentLength() = size
         override fun writeTo(sink: BufferedSink) { open().source().use { sink.writeAll(it) } }
       }
+      val field = if (audio) "audio" else "document"
       val body = MultipartBody.Builder().setType(MultipartBody.FORM)
-        .addFormDataPart("chat_id", chat).addFormDataPart("caption", caption).addFormDataPart("disable_content_type_detection", "true")
-        .apply { if (html) addFormDataPart("parse_mode", "HTML") }
-        .addFormDataPart("document", name.replace('\n', '_').replace('\r', '_'), file).build()
+        .addFormDataPart("chat_id", chat).addFormDataPart("caption", caption)
+        .apply {
+          if (html) addFormDataPart("parse_mode", "HTML")
+          if (audio) {
+            if (title.isNotBlank()) addFormDataPart("title", title)
+            if (performer.isNotBlank()) addFormDataPart("performer", performer)
+          } else addFormDataPart("disable_content_type_detection", "true")
+        }
+        .addFormDataPart(field, name.replace('\n', '_').replace('\r', '_'), file).build()
       // Slow mobile uplinks: allow about 20 KB/s for long recordings.
       val seconds = (240L + maxOf(size, 0L) / 20_000L).coerceAtMost(1800L)
-      return execute(Request.Builder().url("https://api.telegram.org/bot$token/sendDocument").post(body).build(), seconds)
+      val method = if (audio) "sendAudio" else "sendDocument"
+      return execute(Request.Builder().url("https://api.telegram.org/bot$token/$method").post(body).build(), seconds)
     }
 
     override fun cancel() = http.dispatcher.cancelAll()

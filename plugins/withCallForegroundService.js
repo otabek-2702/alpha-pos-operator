@@ -13,6 +13,8 @@ const PERMISSIONS = [
   'REQUEST_INSTALL_PACKAGES', 'UPDATE_PACKAGES_WITHOUT_USER_ACTION',
   // Closed-hours replies, manager alerts and one-tap call back.
   'SEND_SMS', 'CALL_PHONE',
+  // Caller names from the phone's address book in reports and recordings.
+  'READ_CONTACTS',
 ];
 
 module.exports = function withCallForegroundService(config) {

@@ -255,6 +255,7 @@ class OperatorRuntimeInstrumentation : Instrumentation() {
       ledger.markReported(recallMissed().getString("id"), recallMissed().getLong("revision"))
       check(recallMissed().getString("id") !in ledger.unreported(recallMissedAt - 1, 50).map { it.getString("id") }) { "Reported revisions are not queued twice" }
       OperatorTelegramChecks.run(isolated)
+      OperatorAdminChecks.run(isolated)
 
       ledger.enrichCustomer("900001001", "Sinov mijoz")
       val enriched = ledger.pendingRecords("pos-a").single { it.getString("id") == answered.getString("id") }
@@ -273,7 +274,7 @@ class OperatorRuntimeInstrumentation : Instrumentation() {
       check(history.pendingRecords("pos-b").single { it.optString("phone") == "+998900001005" }.isNull("endedAt")) { "A later session must not finish a pre-restart call" }
       check(history.pendingRecords("pos-a").none { it.getString("id") == enriched.getString("id") })
       check(history.pendingRecords("pos-b").any { it.getString("id") == enriched.getString("id") })
-      result.putString("stream", "PASS: answer timing; duplicate ringing; duration; missed outcome; callback refinement and stable revisions; busy waiting calls; unobserved-call matching; hidden number; customer name; independent POS ACK; restart persistence; client recall; callback attempts; order link; Telegram outbox\n")
+      result.putString("stream", "PASS: answer timing; duplicate ringing; duration; missed outcome; callback refinement and stable revisions; busy waiting calls; unobserved-call matching; hidden number; customer name; independent POS ACK; restart persistence; client recall; callback attempts; order link; Telegram outbox; owner bot commands\n")
       resultCode = -1
     } catch (error: Throwable) {
       result.putString("stream", "FAIL: ${error.javaClass.simpleName}: ${error.message}\n${error.stackTrace.take(7).joinToString("\n")}\n")

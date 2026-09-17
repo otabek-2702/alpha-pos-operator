@@ -44,13 +44,26 @@ Holatni **Yordam va ma‘lumot** sahifasidan ko‘rish va **Yangilanishni tekshi
 - 🔴 yo‘qotilgan mijoz — 5 daqiqa ichida bog‘lanilmagan (alohida ogohlantirish xabari ham keladi);
 - ⚫ bloklangan raqam (telefon jiringlamagan), ⚪ ish vaqtidan tashqari qo‘ng‘iroq.
 
-Qidirish uchun heshteglar: `#qabul`, `#otkazib`, `#hal_qilindi`, `#yoqotilgan`, `#chiquvchi`, `#bloklangan`, `#yopiq`, `#ovoz`, `#hisobot`, `#ogohlantirish`; sanali variantlari, masalan `#yoqotilgan170926`, shuningdek `#kun170926`, `#smena1`, `#smena2`.
+Qidirish uchun heshteglar sanali bo‘ladi: holat (`#qabul170926`, `#otkazib170926`, `#hal_qilindi170926`, `#yoqotilgan170926`, `#chiquvchi170926`, `#bloklangan170926`, `#yopiq170926`), smena (`#smena1`, `#smena2`) va shu smenadagi menejer ismi (`#Ali_Valiyev`). Hisobotlar `#hisobot170926`, ogohlantirishlar `#ogohlantirish170926`.
+
+**Ovoz yozuvlari** Telegram pleerida darhol eshitiladi (fayl o‘zgartirilmaydi, telefon qo‘shimcha yuklanmaydi). Fayl nomi qisqa: `+998901234567_260917_153114.m4a`. Izohda: smenadagi menejer, 📥 kiruvchi yoki 📤 chiquvchi, vaqt, suhbat davomiyligi, buyurtma raqami, `#ovoz170926` va eng pastda bo‘sh joysiz raqam hamda telefon kontaktidagi (bo‘lmasa POS dagi) mijoz ismi. Kontakt ismlari uchun **Ruxsatlar** bo‘limida **Kontaktlar** ruxsatini bering.
 
 **Ish tartibi va SMS** (bosh sahifa). Smenalar: 08:00–17:00 va 17:00–02:00. Har smena tugaganda statistikali hisobot yuboriladi va guruhda qadab qo‘yiladi. 02:00–08:00 oralig‘idagi qo‘ng‘iroqlar “yopiq vaqt” deb belgilanadi, yo‘qotilgan hisoblanmaydi va ertalabki hisobotda ko‘rsatiladi. **Qo‘ng‘iroq qilganlarga SMS yuborish** yoqilsa, yopiq vaqtda qo‘ng‘iroq qilgan O‘zbekiston mobil raqamlariga har yopiq davrda bir marta SMS yuboriladi (kunlik chegara bilan). Menejerga xabar va “yo‘qotilgan” vaqtlarini shu yerda o‘zgartirish mumkin.
 
-**Menejerlar** (bosh sahifa). **Menejer qo‘shish** → ism va raqam (**Kontaktlardan tanlash**) → ish jadvali: **Har hafta almashadi** (har yakshanba smena almashadi) yoki **Doimiy**. Javobsiz qo‘ng‘iroqqa 1 daqiqada qayta qo‘ng‘iroq qilinmasa, faqat shu smenadagi menejerlarga SMS va Telegram xabari boradi. Telegram uchun menejerning shaxsiy havolasini unga yuboring; u botda **Start** ni bosganda ulanadi va faqat o‘z smenasidagi ogohlantirishlar, yo‘qotilgan mijozlar va smena hisobotini oladi.
+**Menejerlar** (bosh sahifa). **Menejer qo‘shish** → ism va raqam (**Kontaktlardan tanlash**) → ish jadvali: **Har hafta almashadi** (har yakshanba smena almashadi) yoki **Doimiy**. Javobsiz qo‘ng‘iroqdan keyin telefon bo‘sh turgan 2 daqiqa ichida (operator boshqa mijoz bilan gaplashayotgan vaqt hisoblanmaydi) qayta qo‘ng‘iroq qilinmasa, faqat shu smenadagi menejerlarga SMS va Telegram xabari boradi. “Yo‘qotilgan” uchun 5 daqiqa ham shu tartibda hisoblanadi. Telegram uchun menejerning shaxsiy havolasini unga yuboring; u botda **Start** ni bosganda ulanadi va faqat o‘z smenasidagi ogohlantirishlar, yo‘qotilgan mijozlar va smena hisobotini oladi.
 
 **Qo‘shimcha:** javobsiz qo‘ng‘iroqda telefonda “Qo‘ng‘iroq qilish” tugmali eslatma chiqadi; bir kunda qayta-qayta qo‘ng‘iroq qilgan mijoz belgilanadi; POS 5 daqiqadan ko‘p uzilsa, internet uzilsa, batareya kamaysa yoki zaryadlovchi uzilsa va javob berilgan qo‘ng‘iroqning audiosi 10 daqiqada topilmasa, guruhga ogohlantirish boradi. Guruhda bot buyruqlari: `/holat` (hozirgi holat), `/hisobot` (joriy smena), `/raqam 901234567` (raqam tarixi).
+
+**Telegram orqali boshqarish (egasi uchun).** **Menejerlar** sahifasidagi **Havolani yuborish** tugmasi bilan boshqaruv havolasini faqat o‘zingizga yuboring va botda **Start** ni bosing. Shundan keyin shaxsiy chatda:
+
+- `/sozlamalar` — guruhlar, smenalar, vaqtlar, POS va menejerlar;
+- `/menejer_qosh Ism, +998901234567, 1` — menejer qo‘shish (smena: `1`, `2` yoki `almashadi 1` — bu hafta 1-smena, keyin har yakshanba almashadi);
+- `/menejer_ozgartir 1, raqam, +998901234567` — o‘zgartirish (`ism`, `raqam`, `smena`, `sms ha|yoq`, `telegram ha|yoq`);
+- `/menejer_ochir 1`, `/havola 1` — o‘chirish va menejer havolasi;
+- `/guruh ovoz|hisobot|zaxira -100…` — guruhni almashtirish (bot avval yangi guruhga sinov xabarini yozadi), `/guruh zaxira ochir`;
+- `/yopiq_sms ha|yoq`, `/vaqt menejer 2`, `/vaqt yoqotilgan 5`, `/vaqt sms 50`.
+
+O‘zgarish telefonga darhol yoziladi, ilova ochiq bo‘lsa ekranda ham yangilanadi. **Yangi havola** bosilsa, eski havola bilan ulangan barcha hisoblar boshqaruvdan uziladi.
 
 **POS turi.** Bosh sahifada har bir POS uchun **Operator** yoki **Kassa** ni tanlang. Operator POS ida qo‘ng‘iroq oynasi ochiladi (buyurtma kiritilayotgan bo‘lsa, oyna o‘rniga yuqorida kichik xabar chiqadi). Kassa POS ida oyna ochilmaydi. Ikkalasida ham buyurtma oynasida hozirgi va so‘nggi qo‘ng‘iroq raqamlari tugma bo‘lib turadi — bir bosishda mijoz raqami kiritiladi. Buning uchun POS dasturi 0.0.17 yoki yangiroq bo‘lishi kerak.
 

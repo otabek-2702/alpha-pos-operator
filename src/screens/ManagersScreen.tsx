@@ -11,6 +11,9 @@ export interface ManagersScreenProps {
   shifts: ShiftConfig[];
   operations: OperatorOperations | null;
   onSave: (managers: ManagerConfig[]) => Promise<void>;
+  /** Owner link for bot commands. */
+  adminInvite?: string;
+  onRenewAdmin: () => Promise<void>;
   onClose: () => void;
 }
 
@@ -33,7 +36,7 @@ function describeSchedule(schedule: ManagerSchedule, shifts: ShiftConfig[]): str
   return `Har hafta almashadi · bu hafta ${name(managerShiftForWeek(schedule, now, shifts))}, keyingi hafta ${name(managerShiftForWeek(schedule, now + WEEK_MS, shifts))}`;
 }
 
-export function ManagersScreen({ managers, shifts, operations, onSave, onClose }: ManagersScreenProps) {
+export function ManagersScreen({ managers, shifts, operations, onSave, adminInvite, onRenewAdmin, onClose }: ManagersScreenProps) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -103,6 +106,27 @@ export function ManagersScreen({ managers, shifts, operations, onSave, onClose }
     } catch { setError('Havolani ulashib bo‘lmadi.'); }
   };
 
+  const shareAdmin = async () => {
+    const link = managerInviteLink(bot, adminInvite);
+    if (!link) { setError('Bot ma’lumoti hali olinmadi. Internetni tekshirib, biroz kuting.'); return; }
+    try {
+      await Share.share({ message: `Smart Food Operator boshqaruvi (faqat egasi uchun). Havolani oching va “Start” ni bosing:\n${link}` });
+    } catch { setError('Havolani ulashib bo‘lmadi.'); }
+  };
+
+  const renewAdmin = () => {
+    Alert.alert('Yangi boshqaruv havolasi', 'Eski havola bilan ulangan barcha hisoblar boshqaruvdan uziladi.', [
+      { text: 'Bekor qilish', style: 'cancel' },
+      {
+        text: 'Yangilash', style: 'destructive', onPress: () => {
+          setBusy(true);
+          setError(null);
+          void onRenewAdmin().catch(() => setError('Havola yangilanmadi.')).finally(() => setBusy(false));
+        },
+      },
+    ]);
+  };
+
   if (draft) {
     return (
       <Screen>
@@ -129,7 +153,7 @@ export function ManagersScreen({ managers, shifts, operations, onSave, onClose }
             </View>
 
             <View style={styles.toggle}>
-              <View style={{ flex: 1 }}><Text style={styles.label}>SMS ogohlantirish</Text><Text style={styles.help}>Javobsiz qo‘ng‘iroqqa 1 daqiqada qayta qo‘ng‘iroq qilinmasa</Text></View>
+              <View style={{ flex: 1 }}><Text style={styles.label}>SMS ogohlantirish</Text><Text style={styles.help}>Javobsiz qo‘ng‘iroqqa belgilangan vaqtda qayta qo‘ng‘iroq qilinmasa</Text></View>
               <Switch accessibilityLabel="SMS ogohlantirish" value={draft.sms} onValueChange={(sms) => setDraft({ ...draft, sms })} trackColor={{ false: colors.borderStrong, true: colors.brandDark }} thumbColor={draft.sms ? colors.brand : colors.muted} />
             </View>
             <View style={styles.toggle}>
@@ -153,6 +177,15 @@ export function ManagersScreen({ managers, shifts, operations, onSave, onClose }
       <ScrollView contentContainerStyle={styles.content}>
         <View style={styles.notice}>
           <Text style={styles.body}>Menejer faqat o‘z smenasidagi ogohlantirishlarni oladi: javobsiz qo‘ng‘iroq (SMS va Telegram), yo‘qotilgan mijoz va smena hisoboti. Telegram uchun menejerga shaxsiy havolani yuboring — u “Start” tugmasini bossa ulanadi.</Text>
+        </View>
+        <View style={styles.card}>
+          <Text style={styles.name}>Telegram orqali boshqarish</Text>
+          <Text style={styles.body}>Egasi shu havolani ochsa, botdagi buyruqlar bilan telefon sozlamalarini o‘zgartira oladi: menejerlar, raqamlar, guruhlar va vaqtlar. Havolani faqat o‘zingizga yuboring.</Text>
+          <Text style={styles.help}>Buyruqlar ro‘yxati: botga /boshqaruv yozing.</Text>
+          <View style={styles.actions}>
+            <Button label="Havolani yuborish" variant="secondary" height={40} onPress={() => void shareAdmin()} disabled={busy || !adminInvite} style={{ flex: 1 }} />
+            <TouchableOpacity accessibilityRole="button" onPress={renewAdmin} disabled={busy} style={styles.small}><Text style={styles.danger}>Yangi havola</Text></TouchableOpacity>
+          </View>
         </View>
         {managers.length === 0 ? <Text style={styles.help}>Hali menejer qo‘shilmagan.</Text> : null}
         {managers.map((manager) => {

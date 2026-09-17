@@ -118,7 +118,7 @@ test('stored configuration is normalised with safe defaults', () => {
     managers: [{ id: 'm1', name: 'Aziz', schedule: { type: 'fixed', shift: 2 } }, { name: 'no id' }] });
   assert.deepEqual(config.targets.map((t) => t.role), ['operator', 'cashier']);
   assert.deepEqual(config.shifts, DEFAULT_SHIFTS);
-  assert.deepEqual(config.alerts, { managerAfterMinutes: 1, lostAfterMinutes: 7, smsDailyCap: 20 });
+  assert.deepEqual(config.alerts, { managerAfterMinutes: 2, lostAfterMinutes: 7, smsDailyCap: 20 });
   assert.equal(config.closedSms.enabled, false);
   assert.ok(config.closedSms.text.includes('08:00 dan 02:00 gacha'));
   assert.equal(config.managers.length, 1);

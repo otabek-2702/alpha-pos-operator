@@ -65,6 +65,29 @@ class OperatorSms(private val context: Context) {
   fun lastError(): String? = prefs.getString("error", null)
 }
 
+/** Names from the operator phone's address book (only with READ_CONTACTS), cached for ten minutes. */
+class OperatorContacts(private val context: Context) {
+  private val cache = HashMap<String, Pair<Long, String?>>()
+
+  fun hasPermission(): Boolean = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
+
+  @Synchronized fun name(phone: String): String? {
+    val digits = phone.filter { it.isDigit() }
+    if (digits.length < 7 || !hasPermission()) return null
+    val now = System.currentTimeMillis()
+    cache[digits]?.takeIf { now - it.first < 10 * 60_000L }?.let { return it.second }
+    val found = try {
+      val uri = Uri.withAppendedPath(android.provider.ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(if (phone.trim().startsWith("+")) "+$digits" else digits))
+      context.contentResolver.query(uri, arrayOf(android.provider.ContactsContract.PhoneLookup.DISPLAY_NAME), null, null, null)?.use {
+        if (it.moveToFirst()) it.getString(0)?.trim()?.takeIf { name -> name.isNotEmpty() }?.take(80) else null
+      }
+    } catch (_: Exception) { null }
+    if (cache.size > 500) cache.clear()
+    cache[digits] = now to found
+    return found
+  }
+}
+
 /** Heads-up reminder on the operator phone with a one-tap call back. */
 object OperatorCallbackReminder {
   private const val CHANNEL = "smart_pos_operator_callbacks"

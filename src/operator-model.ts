@@ -66,6 +66,8 @@ export interface OperatorConfiguration {
   closedSms?: ClosedSmsConfig;
   alerts?: AlertConfig;
   managers?: ManagerConfig[];
+  /** Owner link code for changing settings through the bot; "new" asks the phone for a fresh one. */
+  adminInvite?: string;
 }
 
 export interface OperatorOperations {
@@ -106,6 +108,8 @@ export interface UpdateStatus {
 
 export interface RuntimeSnapshot {
   update?: UpdateStatus;
+  /** Bumped by every stored configuration change (app or owner bot commands). */
+  configRevision?: number;
   operations?: OperatorOperations;
   running: boolean;
   startedAt: number | null;
@@ -168,7 +172,7 @@ export const DEFAULT_SHIFTS: ShiftConfig[] = [
   { index: 2, name: '2-smena', start: '17:00', end: '02:00' },
 ];
 export const DEFAULT_CLOSED_SMS = "Smart Food kafesi hozir ishlamayapti. Ish vaqtimiz: har kuni 08:00 dan 02:00 gacha. Qo'ng'iroq qilganingiz uchun rahmat!";
-export const DEFAULT_ALERTS: AlertConfig = { managerAfterMinutes: 1, lostAfterMinutes: 5, smsDailyCap: 50 };
+export const DEFAULT_ALERTS: AlertConfig = { managerAfterMinutes: 2, lostAfterMinutes: 5, smsDailyCap: 50 };
 const DAY_MS = 86_400_000;
 
 export function isClock(value: string): boolean {
@@ -241,11 +245,12 @@ export function normalizeConfiguration(raw: Partial<OperatorConfiguration> | nul
       text: typeof value.closedSms?.text === 'string' && value.closedSms.text.trim() ? value.closedSms.text : DEFAULT_CLOSED_SMS,
     },
     alerts: {
-      managerAfterMinutes: boundedInt(alerts.managerAfterMinutes, 1, 1, 60),
+      managerAfterMinutes: boundedInt(alerts.managerAfterMinutes, DEFAULT_ALERTS.managerAfterMinutes, 1, 60),
       lostAfterMinutes: boundedInt(alerts.lostAfterMinutes, 5, 1, 240),
       smsDailyCap: boundedInt(alerts.smsDailyCap, 50, 0, 500),
     },
     managers,
+    ...(typeof value.adminInvite === 'string' && value.adminInvite ? { adminInvite: value.adminInvite } : {}),
   };
 }
 

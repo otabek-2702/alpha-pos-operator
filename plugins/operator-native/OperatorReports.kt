@@ -35,6 +35,8 @@ data class OperatorCallView(
   val orderId: String? = null,
   val smsSentAt: Long? = null,
   val callbackForAt: Long? = null,
+  /** Name saved in the operator phone's contacts, preferred over the POS customer name. */
+  val contactName: String? = null,
 )
 
 data class OperatorLostEntry(val phone: String, val name: String?, val at: Long, val link: String?)
@@ -66,7 +68,7 @@ data class OperatorShiftSummary(
 
 /** Pure Uzbek report texts (Telegram HTML) and lifecycle decisions. Only status circles carry colour. */
 object OperatorReports {
-  const val MANAGER_ALERT_MS = 60_000L
+  const val MANAGER_ALERT_MS = 2 * 60_000L
   const val LOST_MS = 5 * 60_000L
 
   fun isMissed(call: OperatorCallView) = call.outcome == "missed" || call.outcome == "rejected"
@@ -86,13 +88,17 @@ object OperatorReports {
     else -> OperatorCallStatus.OTHER
   }
 
-  /** "Not called back within a minute": no callback attempt and no conversation yet. */
-  fun needsManagerAlert(call: OperatorCallView, now: Long, delayMs: Long = MANAGER_ALERT_MS): Boolean =
+  /**
+   * "Not called back in time": no callback attempt and no conversation yet. Time counts from
+   * [quietSince] — the moment the phone became free after the missed call (the operator may
+   * have been talking to another client).
+   */
+  fun needsManagerAlert(call: OperatorCallView, now: Long, delayMs: Long = MANAGER_ALERT_MS, quietSince: Long = 0L): Boolean =
     isMissed(call) && !call.closed && call.resolvedAt == null && call.lostAt == null && call.callbackAttempts == 0 &&
-      call.managerAlertAt == null && now - missedAt(call) >= delayMs
+      call.managerAlertAt == null && now - maxOf(missedAt(call), quietSince) >= delayMs
 
-  fun becomesLost(call: OperatorCallView, now: Long, lostMs: Long = LOST_MS): Boolean =
-    isMissed(call) && !call.closed && call.resolvedAt == null && call.lostAt == null && now - missedAt(call) >= lostMs
+  fun becomesLost(call: OperatorCallView, now: Long, lostMs: Long = LOST_MS, quietSince: Long = 0L): Boolean =
+    isMissed(call) && !call.closed && call.resolvedAt == null && call.lostAt == null && now - maxOf(missedAt(call), quietSince) >= lostMs
 
   fun isUrgent(call: OperatorCallView) = call.missedToday >= 2
 
@@ -110,6 +116,9 @@ object OperatorReports {
   }
 
   fun smsPhone(raw: String): String = digits(raw).let { if (it.isEmpty()) "yashirin raqam" else "+$it" }
+
+  /** "+998901234567" without spaces, or null for a hidden number. */
+  fun compactPhone(raw: String?): String? = raw?.let { digits(it) }?.takeIf { it.isNotEmpty() }?.let { "+$it" }
 
   /** SMS text in GSM-7: Uzbek apostrophes become ASCII so one SMS holds 160 characters. */
   fun smsSafe(text: String): String = text.replace('‘', '\'').replace('’', '\'').replace('ʻ', '\'').replace('ʼ', '\'')
@@ -129,9 +138,12 @@ object OperatorReports {
     }
   }
 
+  fun displayName(call: OperatorCallView): String? =
+    (call.contactName?.takeIf { it.isNotBlank() } ?: call.customerName?.takeIf { it.isNotBlank() })?.trim()?.take(80)
+
   private fun who(call: OperatorCallView): String {
     val number = esc(phone(call.phone))
-    val name = call.customerName?.takeIf { it.isNotBlank() }?.let { esc(it.take(80)) }
+    val name = displayName(call)?.let { esc(it) }
     return if (name != null) "<b>$name</b> · $number" else number
   }
 
@@ -146,16 +158,25 @@ object OperatorReports {
     OperatorCallStatus.OTHER -> "qongiroq"
   }
 
-  fun tags(names: List<String>, at: Long, tz: TimeZone, shiftIndex: Int?): String {
+  /** "G‘ayrat Karimov" -> "#Gayrat_Karimov": a searchable tag for a person. */
+  fun personTag(name: String): String? {
+    val clean = name.replace(Regex("[‘’ʻʼ'`]"), "").trim()
+      .replace(Regex("""[^\p{L}\p{N}]+"""), "_").trim('_').take(40)
+    if (clean.isEmpty()) return null
+    return "#" + if (clean.first().isDigit()) "m_$clean" else clean
+  }
+
+  /** Dated status tags only ("#qabul170926"), then the shift and the people on duty. */
+  fun tags(names: List<String>, at: Long, tz: TimeZone, shiftIndex: Int?, people: List<String> = emptyList()): String {
     val day = OperatorSchedule.dateTag(at, tz)
     val result = LinkedHashSet<String>()
-    for (name in names) { result.add("#$name"); result.add("#$name$day") }
-    result.add("#kun$day")
+    for (name in names) result.add("#$name$day")
     shiftIndex?.let { result.add("#smena$it") }
+    people.mapNotNullTo(result) { personTag(it) }
     return result.joinToString(" ")
   }
 
-  fun callHtml(call: OperatorCallView, tz: TimeZone, lostMs: Long = LOST_MS): String {
+  fun callHtml(call: OperatorCallView, tz: TimeZone, lostMs: Long = LOST_MS, managers: List<String> = emptyList()): String {
     val status = status(call)
     val time = OperatorSchedule.clock(call.startedAt, tz)
     val lines = ArrayList<String>()
@@ -214,7 +235,7 @@ object OperatorReports {
     call.managerAlertAt?.takeIf { missed }?.let { lines.add("Menejerlarga xabar berildi ${OperatorSchedule.clock(it, tz)}") }
     call.orderId?.let { lines.add("Buyurtma: #${esc(it.take(40))}") }
     if (!call.timingObserved) lines.add("<i>Aniq vaqt kuzatilmagan</i>")
-    lines.add(tags(listOf(tag(status)), call.startedAt, tz, call.shiftIndex))
+    lines.add(tags(listOf(tag(status)), call.startedAt, tz, call.shiftIndex.takeIf { !call.closed }, managers))
     return lines.joinToString("\n").take(4000)
   }
 
@@ -230,9 +251,18 @@ object OperatorReports {
     OperatorCallStatus.OTHER -> "⚪ Qo‘ng‘iroq"
   }
 
-  /** Samsung names recordings "… +998901234567_260917_095857.m4a" (number, yymmdd_hhmmss). */
+  private val STAMP = Regex("""(?<!\d)(\d{2})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})(?!\d)""")
+  private val RECORDING_PREFIXES = listOf("Qo‘ng‘iroqni yozib olish", "Qo'ng'iroqni yozib olish", "Call recording", "Запись вызова", "Запись разговора")
+
+  private fun withoutPrefix(text: String): String {
+    var result = text.trim()
+    for (prefix in RECORDING_PREFIXES) if (result.startsWith(prefix, ignoreCase = true)) result = result.substring(prefix.length)
+    return result.trim().trim('_', '-', ' ')
+  }
+
+  /** Samsung names recordings "… +998901234567_260917_095857.m4a" (number or contact name, yymmdd_hhmmss). */
   fun parseRecordingName(name: String, tz: TimeZone): Pair<String?, Long?> {
-    val stamp = Regex("""(?<!\d)(\d{2})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})(?!\d)""").findAll(name).lastOrNull()
+    val stamp = STAMP.findAll(name).lastOrNull()
     val at = stamp?.groupValues?.let { g ->
       val (yy, mo, dd, hh, mi, ss) = g.drop(1).map { it.toInt() }
       if (mo !in 1..12 || dd !in 1..31 || hh > 23 || mi > 59 || ss > 59) null
@@ -245,22 +275,44 @@ object OperatorReports {
 
   private operator fun <T> List<T>.component6(): T = this[5]
 
-  fun managerAlertHtml(call: OperatorCallView, tz: TimeZone): String = listOf(
+  /** The contact name Samsung put into the file name ("Aziz aka"), when there is no number. */
+  fun recordingLabel(name: String): String? {
+    val base = name.substringBeforeLast('.')
+    val stamp = STAMP.findAll(base).lastOrNull()
+    val label = withoutPrefix(if (stamp != null) base.substring(0, stamp.range.first) else base)
+    return label.takeIf { it.isNotEmpty() && Regex("""\+?\d{9,15}""").find(it) == null }
+  }
+
+  /** "Qo‘ng‘iroqni yozib olish +998901234567_260917_153114.m4a" -> "+998901234567_260917_153114.m4a". */
+  fun recordingFileName(original: String, phone: String?): String {
+    val ext = original.substringAfterLast('.', "").takeIf { it.length in 1..5 && it.all(Char::isLetterOrDigit) }?.let { ".${it.lowercase()}" } ?: ""
+    val base = if (ext.isEmpty()) original else original.substringBeforeLast('.')
+    val stamp = STAMP.findAll(base).lastOrNull()
+    val label = compactPhone(phone) ?: withoutPrefix(if (stamp != null) base.substring(0, stamp.range.first) else base)
+    val safe = label.replace(Regex("""[\\/:*?"<>|\r\n]"""), "_").take(60)
+    val name = listOfNotNull(safe.takeIf { it.isNotEmpty() }, stamp?.value).joinToString("_")
+    return (name.ifEmpty { "ovoz" } + ext).take(100)
+  }
+
+  /** Telegram plays MP3 and M4A inline when they are sent as audio. */
+  fun isPlayableAudio(name: String): Boolean = name.substringAfterLast('.', "").lowercase() in setOf("m4a", "mp3")
+
+  fun managerAlertHtml(call: OperatorCallView, tz: TimeZone, minutes: Long = MANAGER_ALERT_MS / 60_000, managers: List<String> = emptyList()): String = listOf(
     "🟡 <b>Javobsiz qo‘ng‘iroq</b> · ${OperatorSchedule.clock(call.startedAt, tz)}",
     who(call),
-    "1 daqiqadan beri qayta qo‘ng‘iroq qilinmadi.",
-    tags(listOf("ogohlantirish"), call.startedAt, tz, call.shiftIndex),
+    "Operator bo‘sh bo‘lgach $minutes daqiqa ichida qayta qo‘ng‘iroq qilinmadi.",
+    tags(listOf("ogohlantirish"), call.startedAt, tz, call.shiftIndex, managers),
   ).joinToString("\n")
 
-  fun managerAlertSms(call: OperatorCallView, tz: TimeZone): String = smsSafe(
+  fun managerAlertSms(call: OperatorCallView, tz: TimeZone, minutes: Long = MANAGER_ALERT_MS / 60_000): String = smsSafe(
     "Smart Food: javobsiz qo‘ng‘iroq ${smsPhone(call.phone)}" +
-      (call.customerName?.takeIf { it.isNotBlank() }?.let { " (${it.take(40)})" } ?: "") +
-      ", ${OperatorSchedule.clock(call.startedAt, tz)}. 1 daqiqadan beri qayta qo‘ng‘iroq qilinmadi.")
+      (displayName(call)?.let { " (${it.take(40)})" } ?: "") +
+      ", ${OperatorSchedule.clock(call.startedAt, tz)}. $minutes daqiqa ichida qayta qo‘ng‘iroq qilinmadi.")
 
-  fun lostAlertHtml(call: OperatorCallView, tz: TimeZone, lostMs: Long = LOST_MS): String = listOf(
+  fun lostAlertHtml(call: OperatorCallView, tz: TimeZone, lostMs: Long = LOST_MS, managers: List<String> = emptyList()): String = listOf(
     "🔴 <b>Yo‘qotilgan mijoz</b>: ${who(call)} · ${OperatorSchedule.clock(call.startedAt, tz)}",
     "${lostMs / 60_000} daqiqa ichida bog‘lanilmadi.",
-    tags(listOf("yoqotilgan", "ogohlantirish"), call.startedAt, tz, call.shiftIndex),
+    tags(listOf("yoqotilgan"), call.startedAt, tz, call.shiftIndex, managers),
   ).joinToString("\n")
 
   fun shiftReportHtml(s: OperatorShiftSummary, tz: TimeZone): String {
@@ -291,16 +343,35 @@ object OperatorReports {
     return lines.joinToString("\n").take(4000)
   }
 
-  fun recordingCaptionHtml(fileName: String, recordedAt: Long, call: OperatorCallView?, tz: TimeZone): String {
+  /**
+   * Audio caption: managers on duty, direction/time/length, one dated tag, and the caller
+   * (number without spaces, with the contact or customer name) at the bottom.
+   */
+  fun recordingCaptionHtml(fileName: String, recordedAt: Long, call: OperatorCallView?, tz: TimeZone,
+    managers: List<String> = emptyList(), filePhone: String? = null): String {
     val lines = ArrayList<String>()
-    lines.add("<b>Ovoz yozuvi</b> · ${OperatorSchedule.date(recordedAt, tz)} ${OperatorSchedule.clock(recordedAt, tz)}")
-    if (call != null) {
-      lines.add(who(call))
-      lines.add((if (call.direction == "out") "Chiquvchi" else "Kiruvchi") + " · suhbat ${duration(call.talkSeconds)}")
-    }
-    lines.add("<code>${esc(fileName.take(120))}</code>")
-    lines.add(tags(listOf("ovoz"), call?.startedAt ?: recordedAt, tz, call?.shiftIndex))
+    if (managers.isNotEmpty()) lines.add("👔 Menejer: " + managers.joinToString(", ") { esc(it.trim().take(40)) })
+    val at = call?.startedAt ?: recordedAt
+    val icon = when (call?.direction) { "out" -> "📤"; "in" -> "📥"; else -> "🎙" }
+    val facts = mutableListOf("$icon ${OperatorSchedule.clock(at, tz)}")
+    if (call != null && call.talkSeconds > 0) facts.add(duration(call.talkSeconds))
+    call?.orderId?.let { facts.add("🧾 #${esc(it.take(40))}") }
+    lines.add(facts.joinToString(" · "))
+    lines.add(tags(listOf("ovoz"), at, tz, null))
+    val number = compactPhone(call?.phone) ?: compactPhone(filePhone)
+    val name = call?.let { displayName(it) } ?: recordingLabel(fileName)
+    lines.add(listOfNotNull(number, name?.let { "<b>${esc(it.take(60))}</b>" }).joinToString(" · ").ifEmpty { "Yashirin raqam" })
     return lines.joinToString("\n").take(1000)
+  }
+
+  /** Title and performer shown by Telegram's audio player. */
+  fun recordingPlayerTitle(fileName: String, recordedAt: Long, call: OperatorCallView?, tz: TimeZone, filePhone: String? = null): Pair<String, String> {
+    val number = compactPhone(call?.phone) ?: compactPhone(filePhone)
+    val name = call?.let { displayName(it) } ?: recordingLabel(fileName)
+    val icon = when (call?.direction) { "out" -> "📤"; "in" -> "📥"; else -> "🎙" }
+    val title = (name ?: number ?: "Yashirin raqam").take(60)
+    val performer = listOfNotNull(number.takeIf { name != null }, "$icon ${OperatorSchedule.clock(call?.startedAt ?: recordedAt, tz)}").joinToString(" · ")
+    return title to performer
   }
 
   fun posHealthHtml(name: String, since: Long, restoredAt: Long?, tz: TimeZone): String {

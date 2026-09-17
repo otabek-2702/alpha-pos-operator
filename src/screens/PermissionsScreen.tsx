@@ -19,6 +19,7 @@ const ROWS = [
   { key: 'notifications', title: 'Bildirishnomalar', description: 'Fonda ishlayotgan xizmat holatini ko‘rsatish', Icon: Bell },
   { key: 'sms', title: 'SMS yuborish', description: 'Yopiq vaqtda mijozga javob va menejerlarga ogohlantirish', Icon: Send },
   { key: 'callPhone', title: 'Qo‘ng‘iroq qilish', description: 'Eslatmadan bir bosishda qayta qo‘ng‘iroq qilish', Icon: Phone },
+  { key: 'contacts', title: 'Kontaktlar', description: 'Hisobot va ovoz yozuvlarida mijozning kontaktdagi ismi', Icon: CallLog },
 ] as const;
 /** Runtime rows plus all-files, battery and install-updates special access. */
 const TOTAL = ROWS.length + 3;
