@@ -85,8 +85,11 @@ try {
     if (-not $Publish) { return }
 
     # 7. Publish to the public release repository and confirm what phones will download.
+    $ErrorActionPreference = 'Continue'   # "not found" arrives on stderr
     & gh repo view $releaseRepo --json name *> $null
-    if ($LASTEXITCODE -ne 0) {
+    $repoMissing = $LASTEXITCODE -ne 0
+    $ErrorActionPreference = 'Stop'
+    if ($repoMissing) {
         Invoke-Checked gh @('repo', 'create', $releaseRepo, '--public', '--add-readme', '--description', 'Smart POS Operator Android app releases (self-update source)')
     }
     $body = if ($Notes) { $Notes } else { "Smart POS Operator $Version" }
