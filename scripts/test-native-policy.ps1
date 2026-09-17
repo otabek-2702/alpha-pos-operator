@@ -23,10 +23,20 @@ $compilerJars = @(
     (Find-CachedJar 'org.jetbrains.intellij.deps\trove4j\1.0.20200330'),
     (Find-CachedJar 'org.jetbrains\annotations')
 )
+# Pure (Android-free) production files and their JVM tests.
+$sources = @(
+    'plugins\operator-native\OperatorRecordingPolicy.kt',
+    'plugins\operator-native\OperatorUpdatePolicy.kt',
+    'plugins\operator-native\OperatorSchedule.kt',
+    'plugins\operator-native\OperatorReports.kt',
+    'tests\native\OperatorRecordingPolicyTest.kt',
+    'tests\native\OperatorOperationsTest.kt'
+) | ForEach-Object { Join-Path $projectRoot $_ }
 $taskOutput = Join-Path $projectRoot '.native-policy-tests'
 New-Item -ItemType Directory -Path $taskOutput -Force | Out-Null
-& $java '-Xmx256m' '-cp' ($compilerJars -join ';') 'org.jetbrains.kotlin.cli.jvm.K2JVMCompiler' '-no-stdlib' '-no-reflect' '-classpath' $stdlib '-jvm-target' '17' '-d' $taskOutput `
-    (Join-Path $projectRoot 'plugins\operator-native\OperatorRecordingPolicy.kt') (Join-Path $projectRoot 'plugins\operator-native\OperatorUpdatePolicy.kt') (Join-Path $projectRoot 'tests\native\OperatorRecordingPolicyTest.kt')
-if ($LASTEXITCODE -ne 0) { throw 'Native recording policy test compilation failed.' }
-& $java '-cp' ($taskOutput + ';' + $stdlib) '__PACKAGE__.OperatorRecordingPolicyTestKt'
-if ($LASTEXITCODE -ne 0) { throw 'Native recording policy tests failed.' }
+& $java '-Xmx384m' '-cp' ($compilerJars -join ';') 'org.jetbrains.kotlin.cli.jvm.K2JVMCompiler' '-no-stdlib' '-no-reflect' '-classpath' $stdlib '-jvm-target' '17' '-d' $taskOutput @sources
+if ($LASTEXITCODE -ne 0) { throw 'Native policy test compilation failed.' }
+foreach ($main in '__PACKAGE__.OperatorRecordingPolicyTestKt', '__PACKAGE__.operations.OperatorOperationsTestKt') {
+    & $java '-cp' ($taskOutput + ';' + $stdlib) $main
+    if ($LASTEXITCODE -ne 0) { throw "Native tests failed: $main" }
+}

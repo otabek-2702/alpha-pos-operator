@@ -47,7 +47,7 @@ class OperatorRuntimeInstrumentation : Instrumentation() {
         }) ?: error("Call-log insert failed")
         inserted.add(uri)
       }
-      fun reconcile() = ledger.tick(JSONObject().put("sendCallStats", false))
+      fun reconcile() = ledger.tick()
       val incoming = "+998900001001"
       val start = System.currentTimeMillis()
       ledger.onPhoneState(TelephonyManager.CALL_STATE_RINGING, "")
@@ -229,6 +229,31 @@ class OperatorRuntimeInstrumentation : Instrumentation() {
       val unknown = ledger.pendingRecords("pos-a").single { it.optString("phone") == "" }
       check(unknown.isNull("answeredAt") && unknown.isNull("endedAt") && unknown.isNull("missedWhileBusy"))
 
+      // 2.2: attempts are counted, the client's own answered call resolves a missed call, POS orders link to calls.
+      val recallPhone = "+998900001011"
+      val recallMissedAt = System.currentTimeMillis()
+      addLog(recallPhone, recallMissedAt, 0, CallLog.Calls.MISSED_TYPE)
+      reconcile()
+      addLog(recallPhone, recallMissedAt + 5, 0, CallLog.Calls.OUTGOING_TYPE)
+      reconcile()
+      fun recallMissed() = ledger.pendingRecords("pos-a").single { it.optString("phone") == recallPhone && it.optString("outcome") == "missed" }
+      check(recallMissed().optInt("callbackAttempts") == 1 && recallMissed().isNull("resolvedAt")) { "An unanswered callback is only an attempt" }
+      check(OperatorReports.status(OperatorCallHistory.view(recallMissed())) == OperatorCallStatus.CALLED_BACK_NO_ANSWER)
+      addLog(recallPhone, recallMissedAt + 10, 42, CallLog.Calls.INCOMING_TYPE)
+      reconcile()
+      check(recallMissed().optString("resolvedBy") == "client" && recallMissed().optLong("resolvedTalkSeconds") == 42L) { "The client's own answered call resolves the missed call" }
+      check(OperatorReports.status(OperatorCallHistory.view(recallMissed())) == OperatorCallStatus.RESOLVED)
+      check(recallMissed().has("shiftId") && recallMissed().has("closed")) { "Calls are annotated with shift or closed hours" }
+      val stableRevision = recallMissed().getLong("revision")
+      reconcile()
+      check(recallMissed().getLong("revision") == stableRevision) { "Reconciling again must not change a resolved call" }
+      ledger.linkOrder("900001011", "777", recallMissedAt + 60_000)
+      check(ledger.pendingRecords("pos-a").any { it.optString("phone") == recallPhone && it.optString("orderId") == "777" }) { "POS orders link to the latest call of that number" }
+      check(recallMissed().getString("id") in ledger.unreported(recallMissedAt - 1, 50).map { it.getString("id") })
+      ledger.markReported(recallMissed().getString("id"), recallMissed().getLong("revision"))
+      check(recallMissed().getString("id") !in ledger.unreported(recallMissedAt - 1, 50).map { it.getString("id") }) { "Reported revisions are not queued twice" }
+      OperatorTelegramChecks.run(isolated)
+
       ledger.enrichCustomer("900001001", "Sinov mijoz")
       val enriched = ledger.pendingRecords("pos-a").single { it.getString("id") == answered.getString("id") }
       check(enriched.optString("customerName") == "Sinov mijoz")
@@ -242,11 +267,11 @@ class OperatorRuntimeInstrumentation : Instrumentation() {
       history.onPhoneState(TelephonyManager.CALL_STATE_RINGING, "+998900001006")
       history.onPhoneState(TelephonyManager.CALL_STATE_IDLE, "")
       addLog("+998900001005", interruptedStart, 0, CallLog.Calls.MISSED_TYPE)
-      history.tick(JSONObject().put("sendCallStats", false))
+      history.tick()
       check(history.pendingRecords("pos-b").single { it.optString("phone") == "+998900001005" }.isNull("endedAt")) { "A later session must not finish a pre-restart call" }
       check(history.pendingRecords("pos-a").none { it.getString("id") == enriched.getString("id") })
       check(history.pendingRecords("pos-b").any { it.getString("id") == enriched.getString("id") })
-      result.putString("stream", "PASS: answer timing; duplicate ringing; duration; missed outcome; callback refinement and stable revisions; busy waiting calls; unobserved-call matching; hidden number; customer name; independent POS ACK; restart persistence\n")
+      result.putString("stream", "PASS: answer timing; duplicate ringing; duration; missed outcome; callback refinement and stable revisions; busy waiting calls; unobserved-call matching; hidden number; customer name; independent POS ACK; restart persistence; client recall; callback attempts; order link; Telegram outbox\n")
       resultCode = -1
     } catch (error: Throwable) {
       result.putString("stream", "FAIL: ${error.javaClass.simpleName}: ${error.message}\n${error.stackTrace.take(7).joinToString("\n")}\n")

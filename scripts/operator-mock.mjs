@@ -10,6 +10,8 @@ for (const [port, token] of expected) {
     socket.on('message', raw => {
       const event = JSON.parse(raw.toString());
       console.log(JSON.stringify({ port, type: event.type, test: event.test ?? false, recordId: event.record?.id,
+        ...(event.type === 'operator_hello' ? { role: event.role, protocol: event.protocol } : {}),
+        ...(event.type === 'call_state' ? { states: (event.calls ?? []).map((call) => call.state) } : {}),
         ...(event.record ? { outcome: event.record.outcome, ringSeconds: event.record.ringSeconds,
           talkSeconds: event.record.talkSeconds, named: event.record.customerName === 'Sinov mijoz', revision: event.record.revision } : {}),
       }));

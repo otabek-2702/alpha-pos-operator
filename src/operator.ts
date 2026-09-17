@@ -1,6 +1,6 @@
 import { NativeModules, PermissionsAndroid, Platform } from 'react-native';
 import type { FolderListing, OperatorConfiguration, RecordingFolder, RuntimeSnapshot } from './operator-model';
-import { EMPTY_TELEGRAM, safeTelegramSettings } from './operator-model';
+import { normalizeConfiguration } from './operator-model';
 
 export * from './operator-model';
 
@@ -18,6 +18,7 @@ interface RuntimeModule {
   listFolders(path: string | null): Promise<string>;
   checkForUpdate(): Promise<void>;
   openInstallSettings(): Promise<void>;
+  pickContact(): Promise<string | null>;
 }
 
 function runtime(): RuntimeModule {
@@ -29,8 +30,7 @@ function runtime(): RuntimeModule {
 }
 
 export async function getOperatorConfiguration(): Promise<OperatorConfiguration> {
-  const config = JSON.parse(await runtime().getConfiguration()) as OperatorConfiguration;
-  return { targets: config.targets ?? [], telegram: safeTelegramSettings(config.telegram ?? EMPTY_TELEGRAM) };
+  return normalizeConfiguration(JSON.parse(await runtime().getConfiguration()) as Partial<OperatorConfiguration>);
 }
 
 export async function configureOperator(config: OperatorConfiguration): Promise<void> {
@@ -60,6 +60,14 @@ export async function openBatterySettings(): Promise<void> { await runtime().ope
 export async function checkForUpdate(): Promise<void> { await runtime().checkForUpdate(); }
 /** Android's "Install unknown apps" page for this app; needed for silent self-updates. */
 export async function openInstallSettings(): Promise<void> { await runtime().openInstallSettings(); }
+
+/** Android's contact picker (no contacts permission needed). */
+export async function pickContact(): Promise<{ name: string; phone: string } | null> {
+  const raw = await runtime().pickContact();
+  if (!raw) return null;
+  const value = JSON.parse(raw) as { name?: string; phone?: string };
+  return { name: value.name ?? '', phone: value.phone ?? '' };
+}
 
 /** `access: false` means "All files access" is not granted yet. */
 export async function findRecordingFolders(): Promise<{ access: boolean; folders: RecordingFolder[] }> {

@@ -18,16 +18,19 @@ import { StatusScreen } from './src/screens/StatusScreen';
 import { SupportScreen } from './src/screens/SupportScreen';
 import { TelegramScreen } from './src/screens/TelegramScreen';
 import { WorkHistoryScreen } from './src/screens/WorkHistoryScreen';
+import { ManagersScreen } from './src/screens/ManagersScreen';
+import { WorkScheduleScreen } from './src/screens/WorkScheduleScreen';
 import { checkPermissions, hasRequiredPermissions, PermissionState } from './src/permissions';
 import { clearDesktopUrl, loadDesktopUrl } from './src/storage';
 import {
   configureOperator, EMPTY_TELEGRAM, getOperatorConfiguration, getRuntimeSnapshot,
   OperatorConfiguration, parsePairingCode, parseTelegramSetupCode, pickRecordingFolder, RuntimeSnapshot,
-  sendOperatorTest, TelegramSettings, upsertPos,
+  sendOperatorTest, TelegramSettings, upsertPos, DEFAULT_ALERTS, DEFAULT_CLOSED_SMS, DEFAULT_SHIFTS,
 } from './src/operator';
+import type { AlertConfig, ClosedSmsConfig, ManagerConfig, PosRole, SavedPos, ShiftConfig } from './src/operator';
 import { colors, fonts } from './src/theme';
 
-type Page = 'home' | 'pair' | 'telegram-scan' | 'permissions' | 'telegram' | 'history' | 'support';
+type Page = 'home' | 'pair' | 'telegram-scan' | 'permissions' | 'telegram' | 'history' | 'support' | 'schedule' | 'managers';
 const CONFIG_LOAD_ERROR = 'Saqlangan POS va Telegram sozlamalarini o‘qib bo‘lmadi. “Qayta yuklash” tugmasini bosing. Muammo davom etsa, ilovani qayta oching yoki yangi APKni o‘rnating.';
 
 export default function App() {
@@ -193,10 +196,33 @@ function Root() {
     return operation;
   };
 
+  /** New POS: ask whether it takes operator calls (popup) or is a cashier (number only). */
+  const askRole = (name: string) => new Promise<PosRole>((resolve) => {
+    Alert.alert('Bu POS qanday ishlatiladi?', `${name}\n\nOperator: qo‘ng‘iroq kelganda oyna ochiladi.\nKassa: oyna ochilmaydi, qo‘ng‘iroqdagi raqam tez kiritish uchun beriladi.`, [
+      { text: 'Kassa', onPress: () => resolve('cashier') },
+      { text: 'Operator', onPress: () => resolve('operator') },
+    ], { cancelable: false });
+  });
+
   const handlePaired = async (raw: string) => {
-    const target = parsePairingCode(raw);
+    const scanned = parsePairingCode(raw);
+    const existing = configRef.current.targets.find((item) => item.id === scanned.id);
+    const target: SavedPos = { ...scanned, role: existing?.role ?? await askRole(scanned.name) };
     await save((previous) => ({ ...previous, targets: upsertPos(previous.targets, target) }));
     setPage('home');
+  };
+
+  const handleRoleChange = (id: string, role: PosRole) => {
+    void save((previous) => ({ ...previous, targets: previous.targets.map((item) => (item.id === id ? { ...item, role } : item)) }))
+      .catch(() => Alert.alert('Saqlanmadi', 'POS turini o‘zgartirib bo‘lmadi. Qayta urinib ko‘ring.'));
+  };
+
+  const handleScheduleSave = async (value: { shifts: ShiftConfig[]; closedSms: ClosedSmsConfig; alerts: AlertConfig }) => {
+    await save((previous) => ({ ...previous, ...value }));
+  };
+
+  const handleManagersSave = async (managers: ManagerConfig[]) => {
+    await save((previous) => ({ ...previous, managers }));
   };
 
   const handleRemove = (id: string) => {
@@ -258,13 +284,21 @@ function Root() {
   } else if (page === 'telegram') {
     content = <TelegramScreen config={config.telegram} snapshot={snapshot?.telegram ?? null}
       onSave={handleTelegramSave} onPickFolder={pickRecordingFolder} onScanSetup={() => setPage('telegram-scan')} onClose={() => setPage('home')} />;
+  } else if (page === 'schedule') {
+    content = <WorkScheduleScreen shifts={config.shifts ?? DEFAULT_SHIFTS} closedSms={config.closedSms ?? { enabled: false, text: DEFAULT_CLOSED_SMS }}
+      alerts={config.alerts ?? DEFAULT_ALERTS} operations={snapshot?.operations ?? null} onSave={handleScheduleSave}
+      onOpenPermissions={() => setPage('permissions')} onClose={() => setPage('home')} />;
+  } else if (page === 'managers') {
+    content = <ManagersScreen managers={config.managers ?? []} shifts={config.shifts ?? DEFAULT_SHIFTS} operations={snapshot?.operations ?? null}
+      onSave={handleManagersSave} onClose={() => setPage('home')} />;
   } else if (page === 'history') {
     content = <WorkHistoryScreen periods={snapshot?.periods ?? []} onClose={() => setPage('home')} />;
   } else if (page === 'support') {
     content = <SupportScreen updates={updates} onClose={() => setPage('home')} />;
   } else {
     content = <StatusScreen snapshot={snapshot} targets={config.targets} permissionGranted={corePermissions}
-      updates={updates} onAdd={() => setPage('pair')} onRemove={handleRemove} onSendTest={handleTest}
+      updates={updates} onAdd={() => setPage('pair')} onRemove={handleRemove} onSendTest={handleTest} onRoleChange={handleRoleChange}
+      onOpenSchedule={() => setPage('schedule')} onOpenManagers={() => setPage('managers')} managerCount={config.managers?.length ?? 0}
       onOpenPermissions={() => setPage('permissions')} onOpenTelegram={() => setPage('telegram')}
       onOpenHistory={() => setPage('history')} onOpenSupport={() => setPage('support')} testing={testing} />;
   }

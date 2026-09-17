@@ -11,10 +11,8 @@ import android.content.pm.PackageInstaller
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
@@ -86,6 +84,14 @@ class OperatorUpdater(private val context: Context) {
         .putString("report_text", "✅ Smart POS Operator avtomatik yangilandi: $name versiyasi o'rnatildi.").commit()
       File(context.filesDir, "updates").listFiles()?.forEach { it.delete() }
       (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(NOTIFICATION)
+    }
+
+    /** The pending "updated / not installed" notice, removed once handed to the durable outbox. */
+    fun takeReport(context: Context): String? {
+      val p = prefs(context)
+      val text = p.getString("report_text", null) ?: return null
+      p.edit().remove("report_text").commit()
+      return text
     }
 
     fun status(context: Context): JSONObject {
@@ -164,11 +170,11 @@ class OperatorUpdater(private val context: Context) {
    * downloads a newer build, and installs it only when [prepareInstall] confirms no call and no
    * Telegram upload is in flight.
    */
-  fun tick(callActive: Boolean, lastCallEndedAt: Long, telegram: JSONObject, prepareInstall: () -> Boolean) = synchronized(lock) {
+  fun tick(callActive: Boolean, lastCallEndedAt: Long, prepareInstall: () -> Boolean) = synchronized(lock) {
     val p = prefs(context)
     val now = System.currentTimeMillis()
     val (installedCode, _) = installedVersion(context)
-    reportOutcome(telegram)
+    finishIfInstalled(context)
     if (state(context) == "installing") {
       if (now - p.getLong("install_started", 0L) < OperatorUpdatePolicy.INSTALL_TIMEOUT_MS) return@synchronized
       fail(context, "Yangilanish o'rnatilmadi; qayta uriniladi", report = true)
@@ -310,22 +316,6 @@ class OperatorUpdater(private val context: Context) {
       try { installer.abandonSession(sessionId) } catch (_: Exception) { }
       throw error
     }
-  }
-
-  /** Reports a finished or failed update to the report group; retried until Telegram accepts it. */
-  private fun reportOutcome(telegram: JSONObject) {
-    val p = prefs(context)
-    finishIfInstalled(context)
-    val text = p.getString("report_text", null) ?: return
-    val chat = telegram.optString("statsChatId").ifBlank { telegram.optString("chatId") }
-    val token = telegram.optString("botToken")
-    if (chat.isBlank() || token.isBlank()) return
-    try {
-      val body = JSONObject().put("chat_id", chat).put("text", text).toString().toRequestBody("application/json; charset=utf-8".toMediaType())
-      http.newCall(Request.Builder().url("https://api.telegram.org/bot$token/sendMessage").post(body).build()).execute().use { response ->
-        if (response.isSuccessful) p.edit().remove("report_text").commit()
-      }
-    } catch (_: Exception) { /* Retried next tick; never log the token-bearing URL. */ }
   }
 
   private fun cleanup(keep: String?) {

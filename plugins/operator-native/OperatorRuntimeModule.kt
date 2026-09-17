@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.ContactsContract
 import android.provider.Settings
 import androidx.core.content.ContextCompat
 import com.facebook.react.ReactPackage
@@ -24,6 +25,7 @@ import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.net.URI
+import java.security.SecureRandom
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.Executors
@@ -38,11 +40,14 @@ class OperatorRuntimeModule(private val context: ReactApplicationContext) : Reac
   private val main = Handler(Looper.getMainLooper())
   private var folderPromise: Promise? = null
   private val folderRequest = 8735
+  private var contactPromise: Promise? = null
+  private val contactRequest = 8736
   override fun getName() = "OperatorRuntime"
 
   init {
     context.addActivityEventListener(object : BaseActivityEventListener() {
       override fun onActivityResult(activity: Activity, requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode == contactRequest) { contactResult(resultCode, data); return }
         if (requestCode != folderRequest) return
         val promise = folderPromise ?: return
         folderPromise = null
@@ -72,6 +77,7 @@ class OperatorRuntimeModule(private val context: ReactApplicationContext) : Reac
           val uri = URI(target.getString("url"))
           require(uri.scheme in listOf("ws", "wss") && !uri.host.isNullOrBlank() && uri.userInfo == null && uri.fragment == null) { "POS manzili noto'g'ri" }
           require(target.optInt("discoveryPort", 8766) in 1..65535) { "POS qidirish porti noto'g'ri" }
+          require(target.optString("role", "operator") in setOf("operator", "cashier")) { "POS turi noto'g'ri" }
         }
         value.put("targets", targets)
         val oldTelegram = previous.optJSONObject("telegram")
@@ -80,7 +86,7 @@ class OperatorRuntimeModule(private val context: ReactApplicationContext) : Reac
         val token = telegram.optString("botToken").trim()
         telegram.put("botToken", token)
         if (token.isNotEmpty()) require(Regex("[0-9]{5,}:[A-Za-z0-9_-]{20,}").matches(token)) { "Telegram bot tokeni noto'g'ri" }
-        for (field in listOf("chatId", "statsChatId")) {
+        for (field in listOf("chatId", "statsChatId", "backupChatId")) {
           if (telegram.has(field)) telegram.put(field, telegram.optString(field).trim())
           if (telegram.optString(field).isNotEmpty()) require(Regex("-?[0-9]+|@[A-Za-z0-9_]{5,}").matches(telegram.getString(field))) { "Telegram guruh ID si noto'g'ri" }
         }
@@ -89,6 +95,7 @@ class OperatorRuntimeModule(private val context: ReactApplicationContext) : Reac
           if (Uri.parse(folderUri).scheme == "file") telegram.put("folderUri", Uri.fromFile(OperatorRecordings.localFolder(folderUri)).toString())
           else require(Uri.parse(folderUri).scheme == "content") { "Ovoz yozuvlari papkasini qayta tanlang" }
         }
+        validateOperations(value)
         val recordings = OperatorRecordings(context)
         try {
           if (telegram.optBoolean("enabled")) require(recordings.configured(telegram)) { "Bot tokeni, guruh ID si va yozuvlar papkasini kiriting" }
@@ -122,6 +129,70 @@ class OperatorRuntimeModule(private val context: ReactApplicationContext) : Reac
         promise.reject("CONFIGURE", message)
       }
     }
+  }
+
+  /** Shifts, closed-hours SMS, alert timings and managers; missing manager invite codes are generated here. */
+  private fun validateOperations(value: JSONObject) {
+    value.optJSONArray("shifts")?.let { shifts ->
+      require(shifts.length() in 1..6) { "Smenalar soni 1 dan 6 gacha bo'lishi kerak" }
+      val indexes = HashSet<Int>()
+      for (i in 0 until shifts.length()) {
+        val shift = shifts.getJSONObject(i)
+        require(OperatorSchedule.parseClock(shift.optString("start")) != null && OperatorSchedule.parseClock(shift.optString("end")) != null) { "Smena vaqti noto'g'ri (masalan 08:00)" }
+        require(indexes.add(shift.optInt("index", i + 1)) && shift.optString("name").length <= 40) { "Smena ma'lumotlari noto'g'ri" }
+      }
+    }
+    value.optJSONObject("closedSms")?.let { require(it.optString("text").length <= 300) { "SMS matni 300 belgidan oshmasin" } }
+    value.optJSONObject("alerts")?.let {
+      require(it.optInt("managerAfterMinutes", 1) in 1..60 && it.optInt("lostAfterMinutes", 5) in 1..240 && it.optInt("smsDailyCap", 50) in 0..500) { "Ogohlantirish vaqtlari noto'g'ri" }
+    }
+    value.optJSONArray("managers")?.let { managers ->
+      require(managers.length() <= 30) { "Ko'pi bilan 30 ta menejer qo'shish mumkin" }
+      val ids = HashSet<String>()
+      for (i in 0 until managers.length()) {
+        val manager = managers.getJSONObject(i)
+        require(manager.optString("id").matches(Regex("[A-Za-z0-9_-]{1,64}")) && ids.add(manager.getString("id"))) { "Menejer identifikatori noto'g'ri" }
+        require(manager.optString("name").trim().length in 1..60) { "Menejer ismini kiriting" }
+        require(manager.optString("phone").isBlank() || OperatorReports.isUzbekMobile(manager.optString("phone"))) { "Menejer raqami noto'g'ri (+998 …)" }
+        if (!manager.optString("invite").matches(Regex("[A-Za-z0-9]{16,32}"))) manager.put("invite", inviteCode())
+        val schedule = manager.optJSONObject("schedule") ?: JSONObject().put("type", "fixed").put("shift", 1)
+        require(schedule.optString("type") in setOf("fixed", "rotating")) { "Menejer jadvali noto'g'ri" }
+        if (schedule.optString("type") == "rotating") require(schedule.optLong("anchorWeekStart", 0L) > 0L) { "Almashinuv boshlanadigan haftani tanlang" }
+        manager.put("schedule", schedule)
+      }
+    }
+  }
+
+  private fun inviteCode(): String {
+    val alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+    val random = SecureRandom()
+    return (1..20).map { alphabet[random.nextInt(alphabet.length)] }.joinToString("")
+  }
+
+  /** Android's contact picker: grants access to the one chosen contact, no contacts permission. */
+  @ReactMethod fun pickContact(promise: Promise) {
+    main.post {
+      contactPromise?.resolve(null)
+      contactPromise = null
+      try {
+        val activity = currentActivity ?: throw IllegalStateException()
+        contactPromise = promise
+        activity.startActivityForResult(Intent(Intent.ACTION_PICK, ContactsContract.CommonDataKinds.Phone.CONTENT_URI), contactRequest)
+      } catch (_: Exception) { contactPromise = null; promise.reject("PICK_CONTACT", "Kontaktlar oynasi ochilmadi") }
+    }
+  }
+
+  private fun contactResult(resultCode: Int, data: Intent?) {
+    val promise = contactPromise ?: return
+    contactPromise = null
+    val uri = data?.data
+    if (resultCode != Activity.RESULT_OK || uri == null) { promise.resolve(null); return }
+    try {
+      context.contentResolver.query(uri, arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER, ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME), null, null, null)?.use {
+        if (it.moveToFirst()) promise.resolve(JSONObject().put("phone", it.getString(0) ?: "").put("name", it.getString(1) ?: "").toString())
+        else promise.resolve(null)
+      } ?: promise.resolve(null)
+    } catch (_: Exception) { promise.reject("PICK_CONTACT", "Kontaktni o'qib bo'lmadi") }
   }
 
   @ReactMethod fun getConfiguration(promise: Promise) {
@@ -170,6 +241,15 @@ class OperatorRuntimeModule(private val context: ReactApplicationContext) : Reac
             state.put("telegram", telegram)
           } finally { recordings.close() }
           state.remove("telegramError"); state.remove("telegramBlocked")
+          val operations = service?.supervisorSnapshot() ?: JSONObject()
+          state.put("operations", operations)
+          state.optJSONObject("telegram")?.let { telegram ->
+            telegram.put("backupChatId", config.optJSONObject("telegram")?.optString("backupChatId") ?: "")
+            telegram.put("outboxPending", operations.optInt("outboxPending", 0))
+            telegram.put("statsPending", operations.optInt("outboxPending", 0)).put("statsLastSentAt", operations.optLong("lastSentAt", 0L))
+            if (!operations.isNull("outboxError") && operations.has("outboxError")) telegram.put("statsError", operations.optString("outboxError"))
+            if (!telegram.has("lastError") && !operations.isNull("outboxError") && operations.has("outboxError")) telegram.put("lastError", operations.optString("outboxError"))
+          }
           state.put("update", OperatorUpdater.status(context))
           promise.resolve(state.toString())
         } catch (_: Exception) { promise.reject("SNAPSHOT", "Xizmat holati o'qilmadi") }
@@ -199,7 +279,7 @@ class OperatorRuntimeModule(private val context: ReactApplicationContext) : Reac
     val service = CallBridgeForegroundService.instance
     if (service != null) service.checkUpdateNow()
     else work.execute {
-      try { OperatorUpdater(context).tick(false, 0L, OperatorRuntimeStore.config(context).optJSONObject("telegram") ?: JSONObject()) { true } }
+      try { OperatorUpdater(context).tick(false, 0L) { true } }
       catch (_: Exception) { }
     }
     promise.resolve(null)

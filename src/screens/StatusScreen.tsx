@@ -1,11 +1,11 @@
 import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 
-import { Clock, DotsVertical, PhoneFill, Rescan, Send, Settings } from '../components/Icons';
+import { Bell, CallLog, Clock, DotsVertical, PhoneFill, Rescan, Send, Settings } from '../components/Icons';
 import { Button, Label, Screen } from '../components/ui';
 import { UpdateBanner } from '../components/UpdateBanner';
 import type { AppUpdates } from '../hooks/useAppUpdates';
-import type { RuntimeSnapshot, SavedPos } from '../operator';
+import type { PosRole, RuntimeSnapshot, SavedPos } from '../operator';
 import { colors, fonts, radius, space, tint } from '../theme';
 
 export interface StatusScreenProps {
@@ -15,11 +15,15 @@ export interface StatusScreenProps {
   updates: AppUpdates;
   onAdd: () => void;
   onRemove: (id: string) => void;
+  onRoleChange: (id: string, role: PosRole) => void;
   onSendTest: () => void;
   onOpenPermissions: () => void;
   onOpenTelegram: () => void;
   onOpenHistory: () => void;
   onOpenSupport: () => void;
+  onOpenSchedule: () => void;
+  onOpenManagers: () => void;
+  managerCount: number;
   testing?: boolean;
 }
 
@@ -85,6 +89,19 @@ export function StatusScreen(props: StatusScreenProps) {
                 <View style={styles.posState}><View style={[styles.smallDot, { backgroundColor: color }]} /><Text style={[styles.posStateText, { color }]}>{label}</Text></View>
                 <Text numberOfLines={1} style={styles.address}>{(runtime?.url ?? target.url).split('?')[0]}</Text>
                 {runtime?.error ? <Text style={[styles.description, { color: colors.muted, marginTop: 4 }]}>{runtime.error}</Text> : null}
+                <View style={styles.roles}>
+                  {(['operator', 'cashier'] as const).map((role) => {
+                    const selected = (target.role ?? 'operator') === role;
+                    return (
+                      <TouchableOpacity key={role} accessibilityRole="button" accessibilityState={{ selected }}
+                        accessibilityLabel={`${target.name}: ${role === 'operator' ? 'Operator' : 'Kassa'}`}
+                        onPress={() => { if (!selected) props.onRoleChange(target.id, role); }} style={[styles.role, selected && styles.roleSelected]}>
+                        <Text style={[styles.roleText, selected && { color: colors.text }]}>{role === 'operator' ? 'Operator' : 'Kassa'}</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+                <Text style={styles.roleHint}>{(target.role ?? 'operator') === 'operator' ? 'Qo‘ng‘iroq oynasi ochiladi' : 'Oyna ochilmaydi, raqam tez kiritish uchun beriladi'}</Text>
               </View>
               <TouchableOpacity accessibilityRole="button" accessibilityLabel={`${target.name} POS ni o‘chirish`} onPress={() => props.onRemove(target.id)} style={styles.removeButton}><Text style={styles.removeText}>O‘chirish</Text></TouchableOpacity>
             </View>
@@ -97,7 +114,11 @@ export function StatusScreen(props: StatusScreenProps) {
           <View style={styles.divider} />
           <SettingsRow icon={<Send size={20} color={colors.brand} />} title="Telegram yozuvlari va hisobot" description={telegramDescription} onPress={props.onOpenTelegram} />
           <View style={styles.divider} />
-          <SettingsRow icon={<Clock size={20} color={colors.brand} />} title="Ishlash tarixi" description="Xizmat yoqilgan va to‘xtagan vaqtlar" onPress={props.onOpenHistory} />
+          <SettingsRow icon={<Clock size={20} color={colors.brand} />} title="Ish tartibi va SMS" description="Smenalar, yopiq vaqtdagi SMS va ogohlantirish vaqtlari" onPress={props.onOpenSchedule} />
+          <View style={styles.divider} />
+          <SettingsRow icon={<Bell size={20} color={colors.brand} />} title="Menejerlar" description={props.managerCount ? `${props.managerCount} ta menejer · SMS va Telegram ogohlantirishlari` : 'Javobsiz qo‘ng‘iroqlar haqida xabar oladiganlar'} onPress={props.onOpenManagers} />
+          <View style={styles.divider} />
+          <SettingsRow icon={<CallLog size={20} color={colors.brand} />} title="Ishlash tarixi" description="Xizmat yoqilgan va to‘xtagan vaqtlar" onPress={props.onOpenHistory} />
         </View>
       </ScrollView>
 
@@ -142,6 +163,11 @@ const styles = StyleSheet.create({
   smallDot: { width: 6, height: 6, borderRadius: 3 },
   posStateText: { fontFamily: fonts.medium, fontSize: 12 },
   address: { color: colors.muted2, fontFamily: fonts.mono, fontSize: 10, marginTop: 5 },
+  roles: { flexDirection: 'row', gap: 6, marginTop: 10 },
+  role: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.inset },
+  roleSelected: { borderColor: colors.brand, backgroundColor: tint.brandBg },
+  roleText: { color: colors.muted, fontFamily: fonts.semibold, fontSize: 12 },
+  roleHint: { color: colors.muted, fontFamily: fonts.regular, fontSize: 11, marginTop: 4 },
   removeButton: { minHeight: 44, paddingHorizontal: 10, justifyContent: 'center' },
   removeText: { color: colors.danger, fontFamily: fonts.medium, fontSize: 12 },
   settings: { backgroundColor: colors.inset, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border },

@@ -13,7 +13,9 @@ const envPath = path.join(root, '.env.telegram');
 const titles = {
   recordings: 'Smart Food ovoz yozuvlari',
   stats: "Smart Food qo'ng'iroqlar ma'lumotlari",
+  backup: 'Smart Food zaxira',
 };
+const envKeys = { recordings: 'TELEGRAM_RECORDINGS_CHAT_ID', stats: 'TELEGRAM_STATS_CHAT_ID', backup: 'TELEGRAM_BACKUP_CHAT_ID' };
 
 function parseEnv(text) {
   return Object.fromEntries(text.split(/\r?\n/).flatMap((line) => {
@@ -113,7 +115,7 @@ async function run() {
       if (chat && ['group', 'supergroup'].includes(chat.type) && Object.values(titles).includes(chat.title)) seen.set(String(chat.id), chat);
     }
     for (const [kind, title] of Object.entries(titles)) {
-      const key = kind === 'recordings' ? 'TELEGRAM_RECORDINGS_CHAT_ID' : 'TELEGRAM_STATS_CHAT_ID';
+      const key = envKeys[kind];
       const matches = [...seen.values()].filter((chat) => chat.title === title);
       if (matches.length > 1 && !settings[key]) throw new Error(`Multiple groups named ${title}; select the correct ID locally before continuing.`);
       if (!settings[key] && matches.length === 1) await saveSetting(key, String(matches[0].id));
@@ -153,7 +155,11 @@ async function run() {
     const privateDirectory = path.join(root, '.private');
     await mkdir(privateDirectory, { recursive: true, mode: 0o700 });
     const destination = path.join(privateDirectory, 'telegram-setup.png');
-    const payload = { type: 'smart_pos_telegram', version: 1, botToken: token, chatId: recordings.id, statsChatId: stats.id };
+    // Version 2 adds the backup group; the phone still accepts version 1.
+    const backup = settings.TELEGRAM_BACKUP_CHAT_ID ? await verifyGroup('TELEGRAM_BACKUP_CHAT_ID', titles.backup) : null;
+    if (backup && [recordings.id, stats.id].includes(backup.id)) throw new Error('The backup group must be separate from the other groups.');
+    const payload = { type: 'smart_pos_telegram', version: backup ? 2 : 1, botToken: token, chatId: recordings.id, statsChatId: stats.id,
+      ...(backup ? { backupChatId: backup.id } : {}) };
     await qrcode.toFile(destination, JSON.stringify(payload), { width: 800, margin: 4, errorCorrectionLevel: 'M' });
     console.log(`Private phone setup QR saved: ${destination}`);
     return;

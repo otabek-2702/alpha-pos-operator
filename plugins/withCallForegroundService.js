@@ -11,6 +11,8 @@ const PERMISSIONS = [
   'REQUEST_IGNORE_BATTERY_OPTIMIZATIONS', 'MANAGE_EXTERNAL_STORAGE',
   // Self-update from GitHub releases; Android 12+ installs our own update without a prompt.
   'REQUEST_INSTALL_PACKAGES', 'UPDATE_PACKAGES_WITHOUT_USER_ACTION',
+  // Closed-hours replies, manager alerts and one-tap call back.
+  'SEND_SMS', 'CALL_PHONE',
 ];
 
 module.exports = function withCallForegroundService(config) {

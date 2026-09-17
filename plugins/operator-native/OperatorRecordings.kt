@@ -11,22 +11,11 @@ import android.os.Build
 import android.os.Environment
 import android.provider.DocumentsContract
 import androidx.core.content.ContextCompat
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.MultipartBody
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody
-import okio.BufferedSink
-import okio.source
 import org.json.JSONObject
 import java.io.File
-import java.io.FileInputStream
 import java.io.IOException
-import java.text.SimpleDateFormat
-import java.util.Date
 import java.util.Locale
 import java.util.UUID
-import java.util.concurrent.TimeUnit
 
 data class OperatorAudioFile(val uri: String, val name: String, val size: Long, val modified: Long)
 
@@ -53,8 +42,6 @@ class OperatorRecordings(private val context: Context, private val inventorySour
       return folder
     }
   }
-  private val http = OkHttpClient.Builder().connectTimeout(20, TimeUnit.SECONDS).writeTimeout(180, TimeUnit.SECONDS)
-    .readTimeout(60, TimeUnit.SECONDS).callTimeout(240, TimeUnit.SECONDS).retryOnConnectionFailure(false).build()
 
   override fun onCreate(db: SQLiteDatabase) {
     db.execSQL("CREATE TABLE recordings (baseline TEXT NOT NULL, uri TEXT NOT NULL, name TEXT NOT NULL, size INTEGER NOT NULL, modified INTEGER NOT NULL, first_seen INTEGER NOT NULL, stable_since INTEGER NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_attempt INTEGER NOT NULL DEFAULT 0, sent_at INTEGER, message_id INTEGER, error TEXT, PRIMARY KEY(baseline,uri))")
@@ -157,7 +144,7 @@ class OperatorRecordings(private val context: Context, private val inventorySour
       var pending = 0
       while (cursor.moveToNext()) {
         when (cursor.getString(0)) {
-          "pending", "watching", "failed" -> pending += cursor.getInt(1)
+          "pending", "queued", "watching", "failed" -> pending += cursor.getInt(1)
           "sent" -> { result.put("sent", cursor.getInt(1)); result.put("lastSentAt", cursor.getLong(2)) }
         }
       }
@@ -213,91 +200,27 @@ class OperatorRecordings(private val context: Context, private val inventorySour
     } finally { db.endTransaction() }
   }
 
-  /** Makes every queued upload due now and lifts a stale configuration block (restart, reconnect). */
-  fun retryNow() = synchronized(lock) {
-    writableDatabase.execSQL("UPDATE recordings SET next_attempt=0 WHERE state='pending'")
-    OperatorRuntimeStore.update(context) { it.remove("telegramBlocked") }
+  /** Stable new recordings ready for Telegram, with the call-time hints needed for a caption. */
+  fun readyForDelivery(telegram: JSONObject, limit: Int = 20): List<OperatorAudioFile> = synchronized(lock) {
+    if (!telegram.optBoolean("enabled") || !configured(telegram)) return@synchronized emptyList()
+    val list = ArrayList<OperatorAudioFile>()
+    readableDatabase.rawQuery("SELECT uri,name,size,modified FROM recordings WHERE baseline=? AND state='pending' ORDER BY first_seen LIMIT ?",
+      arrayOf(telegram.optString("_baseline"), limit.toString())).use {
+      while (it.moveToNext()) list.add(OperatorAudioFile(it.getString(0), it.getString(1), it.getLong(2), it.getLong(3)))
+    }
+    list
   }
 
-  /** Uploads one due recording; true only when Telegram accepted it. */
-  fun uploadNext(telegram: JSONObject): Boolean {
-    if (!telegram.optBoolean("enabled") || !configured(telegram)) return false
-    if (OperatorRuntimeStore.state(context).optBoolean("telegramBlocked")) return false
-    val baseline = telegram.optString("_baseline")
-    val now = System.currentTimeMillis()
-    var file: OperatorAudioFile? = null
-    var attempts = 0
-    synchronized(lock) {
-      readableDatabase.rawQuery("SELECT uri,name,size,modified,attempts FROM recordings WHERE baseline=? AND state='pending' AND next_attempt<=? ORDER BY first_seen LIMIT 1", arrayOf(baseline, now.toString())).use {
-        if (it.moveToFirst()) { file = OperatorAudioFile(it.getString(0), it.getString(1), it.getLong(2), it.getLong(3)); attempts = it.getInt(4) }
-      }
-    }
-    val selected = file ?: return false
-    try {
-      val uri = Uri.parse(selected.uri)
-      val local = if (uri.scheme == "file") File(uri.path ?: "") else null
-      fun resumedWriting() = synchronized(lock) { writableDatabase.update("recordings", ContentValues().apply { put("state", "watching"); put("stable_since", now) }, "baseline=? AND uri=?", arrayOf(baseline, selected.uri)) }
-      // Recheck just before streaming so a recording that resumed writing is never uploaded early.
-      if (local != null) {
-        if (!hasAllFilesAccess(context)) throw SecurityException("all files access revoked")
-        if (!local.isFile) throw IOException("missing recording")
-        if (local.length() != selected.size || local.lastModified() != selected.modified) { resumedWriting(); return false }
-      } else {
-        context.contentResolver.query(uri, arrayOf(DocumentsContract.Document.COLUMN_SIZE, DocumentsContract.Document.COLUMN_LAST_MODIFIED), null, null, null)?.use { row ->
-          if (!row.moveToFirst()) throw IOException("missing recording")
-          if (row.getLong(0) != selected.size || row.getLong(1) != selected.modified) { resumedWriting(); return false }
-        } ?: throw IOException("missing recording")
-      }
-      val body = object : RequestBody() {
-        override fun contentType() = "application/octet-stream".toMediaType()
-        override fun contentLength() = selected.size
-        override fun writeTo(sink: BufferedSink) {
-          val input = if (local != null) FileInputStream(local) else context.contentResolver.openInputStream(uri) ?: throw IOException("recording unavailable")
-          input.source().use { sink.writeAll(it) }
-        }
-      }
-      val whenRecorded = SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.ROOT).format(Date(if (selected.modified > 0) selected.modified else now))
-      val multipart = MultipartBody.Builder().setType(MultipartBody.FORM)
-        .addFormDataPart("chat_id", telegram.getString("chatId"))
-        .addFormDataPart("caption", "Smart POS Operator • Ovoz yozuvi\n$whenRecorded\n${selected.name.take(200)}")
-        .addFormDataPart("document", selected.name.replace('\n', '_').replace('\r', '_'), body).build()
-      val request = Request.Builder().url("https://api.telegram.org/bot${telegram.getString("botToken")}/sendDocument").post(multipart).build()
-      http.newCall(request).execute().use { response ->
-        val json = try { JSONObject(response.body?.string() ?: "{}") } catch (_: Exception) { JSONObject() }
-        if (response.isSuccessful && json.optBoolean("ok")) {
-          synchronized(lock) {
-            writableDatabase.update("recordings", ContentValues().apply {
-              put("state", "sent"); put("sent_at", System.currentTimeMillis()); put("message_id", json.optJSONObject("result")?.optLong("message_id") ?: 0L); putNull("error")
-            }, "baseline=? AND uri=?", arrayOf(baseline, selected.uri))
-          }
-          OperatorRuntimeStore.update(context) { it.remove("telegramError") }
-          return true
-        } else {
-          val code = json.optInt("error_code", response.code)
-          if (code == 400 || code == 401 || code == 403 || code == 404) {
-            error("Telegram sozlamalari yoki guruh ruxsati xato (HTTP $code). Token va guruh ID sini tekshiring")
-            OperatorRuntimeStore.update(context) { it.put("telegramBlocked", true) }
-          } else {
-            val seconds = if (code == 429) maxOf(1L, json.optJSONObject("parameters")?.optLong("retry_after", 60L) ?: 60L) else OperatorRecordingPolicy.retrySeconds(attempts)
-            retry(selected, baseline, attempts, seconds, "Telegram vaqtincha mavjud emas (HTTP $code); qayta yuboriladi")
-          }
-        }
-      }
-    } catch (_: SecurityException) {
-      val message = if (selected.uri.startsWith("file:")) "Yozuvni o'qish uchun \"Barcha fayllarga kirish\" ruxsatini bering" else "Yozuvni o'qishga ruxsat yo'q; papkani qayta tanlang"
-      retry(selected, baseline, attempts, 300, message)
-    } catch (_: Exception) {
-      retry(selected, baseline, attempts, OperatorRecordingPolicy.retrySeconds(attempts), "Yozuv yuborilmadi; internet tiklangach qayta yuboriladi")
-    }
-    return false
+  /** Handed to the Telegram outbox; the outbox now owns retries. */
+  fun markQueued(telegram: JSONObject, uri: String) = synchronized(lock) {
+    writableDatabase.update("recordings", ContentValues().apply { put("state", "queued") }, "baseline=? AND uri=?", arrayOf(telegram.optString("_baseline"), uri))
   }
 
-  private fun retry(file: OperatorAudioFile, baseline: String, attempts: Int, seconds: Long, message: String) {
-    synchronized(lock) { writableDatabase.update("recordings", ContentValues().apply {
-      put("attempts", attempts + 1); put("next_attempt", System.currentTimeMillis() + seconds.coerceIn(1L, 2_147_483_647L) * 1000); put("error", message)
-    }, "baseline=? AND uri=?", arrayOf(baseline, file.uri)) }
-    error(message)
+  fun markSent(uri: String, messageId: Long) = synchronized(lock) {
+    writableDatabase.update("recordings", ContentValues().apply {
+      put("state", "sent"); put("sent_at", System.currentTimeMillis()); put("message_id", messageId); putNull("error")
+    }, "uri=? AND state='queued'", arrayOf(uri))
   }
+
   private fun error(message: String) = OperatorRuntimeStore.update(context) { it.put("telegramError", message) }
-  fun cancelUploads() { http.dispatcher.cancelAll() }
 }

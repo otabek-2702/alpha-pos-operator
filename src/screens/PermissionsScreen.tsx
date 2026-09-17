@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, AppState, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
-import { Bell, CallLog, Camera, CheckCircle, Phone, Settings, XCircle } from '../components/Icons';
+import { Bell, CallLog, Camera, CheckCircle, Phone, Send, Settings, XCircle } from '../components/Icons';
 import { Button, Screen } from '../components/ui';
 import { getRuntimeAccess, openBatterySettings, openInstallSettings, requestAllFilesAccess, requestBatteryAccess } from '../operator';
 import { checkPermissions, hasRequiredPermissions, openAppSettings, requestAllPermissions, type PermissionState } from '../permissions';
@@ -17,6 +17,8 @@ const ROWS = [
   { key: 'callLog', title: 'Qo‘ng‘iroqlar tarixi', description: 'Raqam, vaqt va javobsiz qo‘ng‘iroqlarni aniqlash', Icon: CallLog },
   { key: 'camera', title: 'Kamera', description: 'POS ni bir marta QR-kod orqali qo‘shish', Icon: Camera },
   { key: 'notifications', title: 'Bildirishnomalar', description: 'Fonda ishlayotgan xizmat holatini ko‘rsatish', Icon: Bell },
+  { key: 'sms', title: 'SMS yuborish', description: 'Yopiq vaqtda mijozga javob va menejerlarga ogohlantirish', Icon: Send },
+  { key: 'callPhone', title: 'Qo‘ng‘iroq qilish', description: 'Eslatmadan bir bosishda qayta qo‘ng‘iroq qilish', Icon: Phone },
 ] as const;
 /** Runtime rows plus all-files, battery and install-updates special access. */
 const TOTAL = ROWS.length + 3;
@@ -87,7 +89,8 @@ export function PermissionsScreen({ onReady, onClose }: PermissionsScreenProps) 
           <Text style={styles.help}>Ilova qayta yoqilganda xizmatni tiklaydi. Android sozlamalaridagi “Majburan to‘xtatish”dan keyin ilovani qo‘lda ochish kerak. Telefon o‘chgan davrda xizmat ishlamaydi.</Text>
         </View>
         {attempted && !runtimeComplete ? <View style={styles.notice}><Text style={styles.description}>Agar ruxsat oynasi boshqa ochilmasa, ilova sozlamalarida ruxsatlarni yoqing. Kamera va bildirishnomalar uchun ham ruxsat berish tavsiya etiladi.</Text><Button label="Ilova sozlamalarini ochish" variant="secondary" onPress={() => void act(openAppSettings)} disabled={busy} /></View> : null}
-        {ready && totalGranted < TOTAL ? <Text style={styles.help}>Qo‘ng‘iroqlar uchun asosiy ruxsatlar berildi. Qolgan ruxsatlar QR skaneri, yozuvlar va fonda ishlash uchun kerak.</Text> : null}
+        {attempted && state && !state.sms ? <Text style={styles.help}>SMS ruxsati oynasi chiqmasa, Android bu ruxsatni faqat APK fayldan o‘rnatilgan ilovaga beradi. Guruhdagi oxirgi APK faylni ochib, ilovani ustidan qayta o‘rnating — sozlamalar saqlanib qoladi.</Text> : null}
+        {ready && totalGranted < TOTAL ?<Text style={styles.help}>Qo‘ng‘iroqlar uchun asosiy ruxsatlar berildi. Qolgan ruxsatlar QR skaneri, yozuvlar va fonda ishlash uchun kerak.</Text> : null}
         {error ? <Text accessibilityLiveRegion="polite" style={styles.error}>{error}</Text> : null}
       </ScrollView>
       <View style={styles.footer}>

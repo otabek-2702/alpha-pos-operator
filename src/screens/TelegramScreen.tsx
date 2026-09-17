@@ -22,6 +22,7 @@ export function TelegramScreen({ config, onSave, onPickFolder, onClose, onScanSe
   const [chatId, setChatId] = useState(config.chatId);
   const [sendCallStats, setSendCallStats] = useState(config.sendCallStats === true);
   const [statsChatId, setStatsChatId] = useState(config.statsChatId ?? '');
+  const [backupChatId, setBackupChatId] = useState(config.backupChatId ?? '');
   const [folder, setFolder] = useState({ uri: config.folderUri, name: config.folderName });
   const [folderInfo, setFolderInfo] = useState<RecordingFolder | null>(null);
   const [fileAccess, setFileAccess] = useState<boolean | null>(null);
@@ -123,6 +124,11 @@ export function TelegramScreen({ config, onSave, onPickFolder, onClose, onScanSe
       setError('Ovoz yozuvlari guruhi ID si manfiy son bo‘ladi, masalan: -1001234567890.');
       return;
     }
+    const backupGroup = backupChatId.trim();
+    if (backupGroup && (!/^-\d+$/.test(backupGroup) || backupGroup === group || backupGroup === statsGroup)) {
+      setError('Zaxira guruhi ID si manfiy son va boshqa guruhlardan farqli bo‘lishi kerak.');
+      return;
+    }
     if (statsGroup && !/^-\d+$/.test(statsGroup)) {
       setError('Qo‘ng‘iroqlar hisoboti guruhi ID si manfiy son bo‘lishi kerak.');
       return;
@@ -147,7 +153,7 @@ export function TelegramScreen({ config, onSave, onPickFolder, onClose, onScanSe
     setError(null);
     setSaved(false);
     try {
-      await onSave({ enabled, chatId: group, statsChatId: statsGroup, sendCallStats, folderUri: folder.uri, folderName: folder.name, sendMissedCalls: false, ...(token ? { botToken: token } : {}) });
+      await onSave({ enabled, chatId: group, statsChatId: statsGroup, backupChatId: backupGroup, sendCallStats, folderUri: folder.uri, folderName: folder.name, sendMissedCalls: false, ...(token ? { botToken: token } : {}) });
       if (token) setTokenStored(true);
       setBotToken('');
       setSaved(true);
@@ -175,6 +181,7 @@ export function TelegramScreen({ config, onSave, onPickFolder, onClose, onScanSe
             <Text style={styles.label}>{tokenStored ? 'Telegram sozlangan' : 'Telegramni ulash'}</Text>
             <Text style={styles.body}>Ovoz yozuvlari: Smart Food ovoz yozuvlari</Text>
             <Text style={styles.body}>Hisobotlar: Smart Food qo‘ng‘iroqlar ma’lumotlari</Text>
+            <Text style={styles.body}>Zaxira: {config.backupChatId ? 'Smart Food zaxira — hamma xabarlar nusxasi' : 'sozlanmagan'}</Text>
             <Text style={styles.help}>{tokenStored ? 'Yozuvlar papkasini tanlang va kerakli yuborish turlarini yoqing.' : 'Tayyorlangan Telegram QR kodini bir marta skanerlang. Keyin Samsung yozuvlarni saqlaydigan papkani tanlang.'}</Text>
             <TouchableOpacity accessibilityRole="button" onPress={() => setManual(!manual)} disabled={busy} style={styles.linkButton}><Text style={styles.backText}>{manual ? 'Qo‘lda sozlashni yopish' : 'Qo‘lda sozlash'}</Text></TouchableOpacity>
           </View>
@@ -242,6 +249,9 @@ export function TelegramScreen({ config, onSave, onPickFolder, onClose, onScanSe
             <Text style={[styles.label, { marginTop: 10 }]}>Qo‘ng‘iroqlar hisoboti guruhi</Text>
             <TextInput accessibilityLabel="Qo‘ng‘iroqlar hisoboti guruhi ID si" value={statsChatId} onChangeText={(value) => { setStatsChatId(value); changed(); }} placeholder="Hisobot uchun alohida guruh ID si" placeholderTextColor={colors.muted2} autoCapitalize="none" autoCorrect={false} editable={!busy} maxLength={24} style={styles.input} />
             <Text style={styles.help}>Shu botni hisobot guruhiga ham qo‘shing. Ovoz yozuvlarini o‘chirib, faqat hisobot yuborishni yoqish mumkin.</Text>
+            <Text style={[styles.label, { marginTop: 10 }]}>Zaxira guruhi</Text>
+            <TextInput accessibilityLabel="Zaxira guruhi ID si" value={backupChatId} onChangeText={(value) => { setBackupChatId(value); changed(); }} placeholder="Barcha xabarlar nusxasi uchun guruh ID si" placeholderTextColor={colors.muted2} autoCapitalize="none" autoCorrect={false} editable={!busy} maxLength={24} style={styles.input} />
+            <Text style={styles.help}>Asosiy guruhlarda xabar tasodifan o‘chirilsa ham, nusxasi shu guruhda qoladi.</Text>
             </> : null}
             <Text style={styles.runtimeStatus}>{snapshot?.sendCallStats ? 'Hisobot yuborish yoqilgan' : 'Hisobot yuborish o‘chirilgan'}</Text>
             {snapshot?.sendCallStats ? <Text style={styles.help}>Navbatdagi hisobotlar: {snapshot.statsPending ?? 0}</Text> : null}

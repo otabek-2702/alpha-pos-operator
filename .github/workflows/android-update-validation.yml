@@ -137,6 +137,12 @@ jobs:
           grep -q '"state":"idle"' <<< "$state"
           grep -q '"targetCount":2' <<< "$state"
           log "PASS: update recorded as finished; POS settings still present"
+
+          # SEND_SMS is hard-restricted: record whether a self-update can make it grantable.
+          sms() { local s; s=$(adb -s $d shell dumpsys package $app | tr -d '\r') || true; grep -m1 'android.permission.SEND_SMS:' <<< "$s" | sed 's/^ *//' || true; }
+          log "INFO: SEND_SMS after self-update: $(sms)"
+          grant=$(adb -s $d shell pm grant $app android.permission.SEND_SMS 2>&1 | tr -d '\r' | head -3) || true
+          log "INFO: shell grant: ${grant:-granted}; now: $(sms)"
           SCRIPT
           bash -n ci/run-update.sh
 

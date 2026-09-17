@@ -10,7 +10,8 @@ const loaded = new Module(filename, module);
 loaded._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
 }).outputText, filename);
-const { parsePairingCode, parseTelegramSetupCode, upsertPos, inspectPosUrl, safeTelegramSettings, recordingFolderLabel } = loaded.exports;
+const { parsePairingCode, parseTelegramSetupCode, upsertPos, inspectPosUrl, safeTelegramSettings, recordingFolderLabel,
+  normalizeConfiguration, isUzbekMobile, formatUzPhone, weekStart, managerShiftForWeek, managerInviteLink, isClock, DEFAULT_SHIFTS } = loaded.exports;
 const qr = (id, ip, token = id) => JSON.stringify({
   version: 2, id, name: `POS ${id}`, url: `ws://${ip}:8765?token=${token}`, discoveryPort: 8766,
 });
@@ -74,7 +75,7 @@ test('native POS-only configuration loads when Telegram has not been configured'
   for (const partial of [{}, { enabled: false, sendCallStats: false }]) {
     assert.deepEqual(safeTelegramSettings(partial), {
       enabled: false, chatId: '', folderUri: '', folderName: '',
-      sendMissedCalls: false, statsChatId: '', sendCallStats: false,
+      sendMissedCalls: false, statsChatId: '', sendCallStats: false, backupChatId: '',
     });
   }
 });
@@ -97,4 +98,57 @@ test('Telegram import rejects a shared destination and never echoes the token', 
 test('recording folders are labelled relative to internal storage', () => {
   assert.equal(recordingFolderLabel({ name: 'Recordings/Call' }), 'Ichki xotira/Recordings/Call');
   assert.equal(recordingFolderLabel({ name: '' }), 'Ichki xotira');
+});
+
+test('setup QR version 2 adds the backup group; version 1 still works', () => {
+  const token = '12345:abcdefghijklmnopqrstuvwx';
+  const v2 = parseTelegramSetupCode(JSON.stringify({ type: 'smart_pos_telegram', version: 2, botToken: token,
+    chatId: '-100111', statsChatId: '-100222', backupChatId: '-100333' }));
+  assert.equal(v2.backupChatId, '-100333');
+  const v1 = parseTelegramSetupCode(JSON.stringify({ type: 'smart_pos_telegram', version: 1, botToken: token, chatId: '-1', statsChatId: '-2' }));
+  assert.ok(!('backupChatId' in v1));
+  assert.throws(() => parseTelegramSetupCode(JSON.stringify({ type: 'smart_pos_telegram', version: 2, botToken: token,
+    chatId: '-100111', statsChatId: '-100222', backupChatId: '-100111' })), (error) => !error.message.includes(token));
+});
+
+test('stored configuration is normalised with safe defaults', () => {
+  const config = normalizeConfiguration({ targets: [{ id: 'a', name: 'A', url: 'ws://1.2.3.4:8765?token=x' }, { id: 'b', name: 'B', url: 'ws://1.2.3.5:8765?token=y', role: 'cashier' }],
+    telegram: { enabled: true, chatId: '-1', folderUri: '', folderName: '', botToken: 'secret' },
+    shifts: [{ index: 1, name: 'Tong', start: '25:00', end: '17:00' }], alerts: { managerAfterMinutes: 0, lostAfterMinutes: 7, smsDailyCap: 20 },
+    managers: [{ id: 'm1', name: 'Aziz', schedule: { type: 'fixed', shift: 2 } }, { name: 'no id' }] });
+  assert.deepEqual(config.targets.map((t) => t.role), ['operator', 'cashier']);
+  assert.deepEqual(config.shifts, DEFAULT_SHIFTS);
+  assert.deepEqual(config.alerts, { managerAfterMinutes: 1, lostAfterMinutes: 7, smsDailyCap: 20 });
+  assert.equal(config.closedSms.enabled, false);
+  assert.ok(config.closedSms.text.includes('08:00 dan 02:00 gacha'));
+  assert.equal(config.managers.length, 1);
+  assert.equal(config.managers[0].sms, true);
+  assert.ok(!('botToken' in config.telegram));
+});
+
+test('phone and clock helpers mirror the native rules', () => {
+  assert.ok(isUzbekMobile('+998 90 123 45 67') && isUzbekMobile('901234567'));
+  assert.ok(!isUzbekMobile('+998 71 200 00 00') && !isUzbekMobile('+7 901 234 56 78') && !isUzbekMobile(''));
+  assert.equal(formatUzPhone('998901234567'), '+998 90 123 45 67');
+  assert.ok(isClock('8:05') && isClock('23:59') && !isClock('24:00') && !isClock('17:60'));
+});
+
+test('weekly manager rotation alternates shifts from Sunday', () => {
+  const thursday = new Date(2026, 8, 17, 12).getTime();
+  const sunday = weekStart(thursday);
+  assert.equal(new Date(sunday).getDay(), 0);
+  assert.equal(new Date(sunday).getDate(), 13);
+  const schedule = { type: 'rotating', anchorWeekStart: sunday, anchorShift: 1 };
+  const week = 7 * 86_400_000;
+  assert.equal(managerShiftForWeek(schedule, sunday, DEFAULT_SHIFTS), 1);
+  assert.equal(managerShiftForWeek(schedule, sunday + week, DEFAULT_SHIFTS), 2);
+  assert.equal(managerShiftForWeek(schedule, sunday - week, DEFAULT_SHIFTS), 2);
+  assert.equal(managerShiftForWeek(schedule, sunday + 2 * week, DEFAULT_SHIFTS), 1);
+  assert.equal(managerShiftForWeek({ type: 'fixed', shift: 2 }, sunday, DEFAULT_SHIFTS), 2);
+});
+
+test('manager invite links need the bot name and the code', () => {
+  assert.equal(managerInviteLink('smart_pos_operator_bot', 'abcDEF1234567890'), 'https://t.me/smart_pos_operator_bot?start=abcDEF1234567890');
+  assert.equal(managerInviteLink('', 'abc'), null);
+  assert.equal(managerInviteLink('bot', undefined), null);
 });

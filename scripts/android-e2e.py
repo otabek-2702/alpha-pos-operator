@@ -351,7 +351,22 @@ try:
     tap("Orqaga")
     adb("shell", "input", "swipe", 360, 430, 360, 1110, 350)
     time.sleep(1)
-    tap("Ikkinchi kassa POS ni o‘chirish")
+    # POS roles: a cashier POS still gets the live caller list but never the old popup message.
+    offset = len(events())
+    tap("Ikkinchi kassa: Kassa", scroll=True)
+    wait_for(lambda: any(e.get("port") == 8767 and e.get("type") == "operator_hello" and e.get("role") == "cashier" for e in events()[offset:]),
+             "cashier role announced to the second POS")
+    offset = len(events())
+    tap("Sinov yuborish")
+    time.sleep(4)
+    legacy = {e["port"] for e in events()[offset:] if e.get("type") == "call_start" and e.get("test")}
+    live = {e["port"] for e in events()[offset:] if e.get("type") == "call_state" and "ringing" in e.get("states", [])}
+    assert legacy == {8765} and live == {8765, 8767}, f"Role routing is wrong: legacy={legacy} live={live}"
+    dismiss_test_alert()
+    stage("PASS: cashier POS gets the caller list without the popup message")
+    adb("shell", "input", "swipe", 360, 430, 360, 1110, 350)
+    time.sleep(1)
+    tap("Ikkinchi kassa POS ni o‘chirish", scroll=True)
     tap("O‘chirish")
     wait_for(lambda: not find("Ikkinchi kassa"), "POS removal")
     time.sleep(3)

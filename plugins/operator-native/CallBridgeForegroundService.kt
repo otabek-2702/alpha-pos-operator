@@ -10,6 +10,8 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -31,6 +33,7 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.NetworkInterface
 import java.net.URI
+import java.util.TimeZone
 import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -42,6 +45,9 @@ class CallBridgeForegroundService : Service() {
       private set
     private const val CHANNEL = "smart_pos_operator_runtime"
     private const val NOTIFICATION = 7651
+    private const val PROTOCOL = 3
+    private const val HANDSHAKE_TIMEOUT_MS = 15_000L
+    private const val RECENT_CALLS_MS = 10 * 60_000L
   }
   private val main = Handler(Looper.getMainLooper())
   private val networkPool = Executors.newFixedThreadPool(2)
@@ -49,6 +55,8 @@ class CallBridgeForegroundService : Service() {
   private val callWorker = Executors.newSingleThreadScheduledExecutor()
   private val ledgerWorker = Executors.newSingleThreadExecutor()
   private val updateWorker = Executors.newSingleThreadScheduledExecutor()
+  private val telegramWorker = Executors.newSingleThreadScheduledExecutor()
+  private var botThread: Thread? = null
   private val websocketHttp = OkHttpClient.Builder().connectTimeout(8, TimeUnit.SECONDS)
     .pingInterval(20, TimeUnit.SECONDS).readTimeout(0, TimeUnit.MILLISECONDS).retryOnConnectionFailure(false).build()
   private val peers = LinkedHashMap<String, Peer>()
@@ -58,6 +66,8 @@ class CallBridgeForegroundService : Service() {
   @Volatile private var lastCallEndedAt = 0L
   /** Set while a self-update is about to restart the app; Telegram sends wait for the new process. */
   @Volatile private var pausedForUpdate = false
+  @Volatile private var networkUp = true
+  @Volatile private var peerHealth: List<OperatorPeerHealth> = emptyList()
   private var answered = false
   private var phone = ""
   private var direction = "in"
@@ -65,24 +75,33 @@ class CallBridgeForegroundService : Service() {
   private var listening = false
   private var lastState = TelephonyManager.CALL_STATE_IDLE
   private var wakeLock: PowerManager.WakeLock? = null
+  private var wifiLock: WifiManager.WifiLock? = null
   private lateinit var recordings: OperatorRecordings
   private lateinit var history: OperatorCallHistory
   private lateinit var updater: OperatorUpdater
+  private lateinit var supervisor: OperatorSupervisor
   private var networkCallback: ConnectivityManager.NetworkCallback? = null
   private var lastHeartbeat = 0L
+  private var lastUptimeTick = 0L
   private var destroyed = false
+  private val liveCalls = ArrayList<LiveCall>()
+  private val names = HashMap<String, String>()
 
-  private class Peer(val id: String, var name: String, val configuredUrl: String, val discoveryPort: Int) {
+  private class Peer(val id: String, var name: String, val configuredUrl: String, val discoveryPort: Int, var role: String) {
     var url = configuredUrl
     var socket: WebSocket? = null
     var status = "disconnected"
     var error: String? = null
     var lastConnectedAt: Long? = null
+    var connectingSince = 0L
     var retryAt = 0L
     var attempt = 0
     var discoveryAt = 0L
     var discovering = false
   }
+
+  /** A call the POS can offer for one-tap number entry. Main thread only. */
+  private class LiveCall(val id: String, var phone: String, val direction: String, var state: String, val since: Long, var endedAt: Long? = null)
 
   override fun onBind(intent: Intent?): IBinder? = null
 
@@ -93,6 +112,7 @@ class CallBridgeForegroundService : Service() {
     // Must post the visible foreground notification before any disk/network work.
     startForegroundNotification()
     history = OperatorCallHistory(this)
+    supervisor = OperatorSupervisor(this, history, recordings)
     updater = OperatorUpdater(this)
     OperatorUpdater.finishIfInstalled(this)
     OperatorRuntimeStore.began(this)
@@ -101,19 +121,31 @@ class CallBridgeForegroundService : Service() {
       acquire()
     }
     try {
+      // Keeps Wi-Fi awake with the screen off so POS connections survive in the background.
+      wifiLock = (applicationContext.getSystemService(WIFI_SERVICE) as WifiManager)
+        .createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "$packageName:pos").apply { setReferenceCounted(false); acquire() }
+    } catch (_: Exception) { }
+    try {
       val manager = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+      networkUp = manager.getNetworkCapabilities(manager.activeNetwork)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
       networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
+          networkUp = true
           main.post { peers.values.forEach { it.retryAt = 0; it.discoveryAt = 0 }; tick() }
           retryPendingNow()
         }
-        override fun onLost(network: Network) { main.post { peers.values.filter { it.status != "connected" }.forEach { it.retryAt = 0 } } }
+        override fun onLost(network: Network) {
+          networkUp = false
+          main.post { peers.values.filter { it.status != "connected" }.forEach { it.retryAt = 0 } }
+        }
       }.also { manager.registerDefaultNetworkCallback(it) }
     } catch (_: Exception) { /* Periodic reconnect remains active if callback is unavailable. */ }
     main.post(ticker)
     recordingWorker.scheduleWithFixedDelay({ processRecordings() }, 10, 15, TimeUnit.SECONDS)
     callWorker.scheduleWithFixedDelay({ processCallHistory() }, 5, 15, TimeUnit.SECONDS)
+    telegramWorker.scheduleWithFixedDelay({ drainTelegram() }, 3, 2, TimeUnit.SECONDS)
     updateWorker.scheduleWithFixedDelay({ runUpdater() }, OperatorUpdatePolicy.FIRST_CHECK_DELAY_MS, 60_000, TimeUnit.MILLISECONDS)
+    botThread = Thread({ pollBotLoop() }, "operator-bot").apply { isDaemon = true; start() }
     // A restart may follow an update, a crash or a reboot: resend everything still unsent right away.
     retryPendingNow()
   }
@@ -122,9 +154,6 @@ class CallBridgeForegroundService : Service() {
     try {
       val telegram = config.optJSONObject("telegram") ?: return
       recordings.scan(telegram, callInProgress, hasPhonePermissions)
-      // Drain a backlog without exceeding Telegram's ~20 messages per minute per group (15 s interval).
-      var sent = 0
-      while (sent < 4 && !callInProgress && !pausedForUpdate && recordings.uploadNext(telegram)) sent++
     } catch (_: Exception) {
       OperatorRuntimeStore.update(this) { it.put("telegramError", "Yozuvlarni tekshirishda xato; papka va ruxsatlarni tekshiring") }
     }
@@ -133,23 +162,41 @@ class CallBridgeForegroundService : Service() {
   private fun processCallHistory() {
     if (pausedForUpdate) return
     try {
-      history.tick(config.optJSONObject("telegram") ?: JSONObject())
+      val current = config
+      val shifts = OperatorSettings.parseShifts(current.optJSONArray("shifts"))
+      history.tick(shifts, TimeZone.getDefault())
+      supervisor.tick(current, OperatorEnvironment(callInProgress, peerHealth, networkUp, appVersion()))
       main.post { if (!destroyed) peers.values.filter { it.status == "connected" }.forEach { sendCallRecords(it) } }
     } catch (_: Exception) { OperatorRuntimeStore.setError(this, "Qo'ng'iroqlar hisobotini yangilab bo'lmadi; ruxsatlarni tekshiring") }
   }
 
-  /** Makes queued recordings and reports due now; used after a restart and when internet returns. */
+  private fun drainTelegram() {
+    if (pausedForUpdate || destroyed) return
+    try { supervisor.drain(config) } catch (_: Exception) { }
+  }
+
+  private fun pollBotLoop() {
+    while (!destroyed) {
+      val ok = try { supervisor.pollBot(config) } catch (_: Exception) { false }
+      if (!ok) try { Thread.sleep(30_000) } catch (_: InterruptedException) { return }
+    }
+  }
+
+  private fun appVersion(): String = try { packageManager.getPackageInfo(packageName, 0).versionName ?: "" } catch (_: Exception) { "" }
+
+  /** Makes queued messages due now; used after a restart and when internet returns. */
   private fun retryPendingNow() {
     if (destroyed) return
     try {
-      recordingWorker.execute { try { recordings.retryNow() } catch (_: Exception) { }; processRecordings() }
-      callWorker.execute { try { history.retryNow() } catch (_: Exception) { }; processCallHistory() }
+      telegramWorker.execute { try { supervisor.retryNow() } catch (_: Exception) { }; drainTelegram() }
+      recordingWorker.execute { processRecordings() }
+      callWorker.execute { processCallHistory() }
     } catch (_: Exception) { /* Executors are shut down while the service is being destroyed. */ }
   }
 
   private fun runUpdater() {
     try {
-      updater.tick(callInProgress, lastCallEndedAt, config.optJSONObject("telegram") ?: JSONObject()) { pauseForUpdate() }
+      updater.tick(callInProgress, lastCallEndedAt) { pauseForUpdate() }
     } catch (_: Exception) { }
     if (OperatorUpdater.state(this) != "installing") pausedForUpdate = false
   }
@@ -158,8 +205,8 @@ class CallBridgeForegroundService : Service() {
   private fun pauseForUpdate(): Boolean {
     pausedForUpdate = true
     try {
-      recordingWorker.submit {}.get(5, TimeUnit.MINUTES)
-      callWorker.submit {}.get(2, TimeUnit.MINUTES)
+      telegramWorker.submit(Runnable {}).get(5, TimeUnit.MINUTES)
+      callWorker.submit(Runnable {}).get(2, TimeUnit.MINUTES)
     } catch (_: Exception) { pausedForUpdate = false; return false }
     if (callInProgress) { pausedForUpdate = false; return false }
     return true
@@ -172,6 +219,8 @@ class CallBridgeForegroundService : Service() {
     try { updateWorker.execute { runUpdater() } } catch (_: Exception) { }
   }
 
+  fun supervisorSnapshot(): JSONObject = supervisor.snapshot()
+
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     reload()
     return START_STICKY
@@ -181,7 +230,7 @@ class CallBridgeForegroundService : Service() {
     if (destroyed) return
     try {
       val next = OperatorRuntimeStore.config(this)
-      if (config.optJSONObject("telegram")?.toString() != next.optJSONObject("telegram")?.toString()) recordings.cancelUploads()
+      if (config.optJSONObject("telegram")?.toString() != next.optJSONObject("telegram")?.toString()) supervisor.telegram.cancel()
       config = next
     } catch (_: Exception) {
       OperatorRuntimeStore.setError(this, "Saqlangan sozlamalar ochilmadi; ilovada sozlamalarni tekshiring")
@@ -193,13 +242,20 @@ class CallBridgeForegroundService : Service() {
     for (i in 0 until targets.length()) {
       val target = targets.getJSONObject(i)
       val id = target.getString("id")
+      val role = if (target.optString("role") == "cashier") "cashier" else "operator"
       desired.add(id)
       val old = peers[id]
       // Preserve discovered addresses on routine saves; accept a newly scanned endpoint immediately.
       if (old == null || old.configuredUrl != target.getString("url") || old.discoveryPort != target.optInt("discoveryPort", 8766)) {
         old?.socket?.cancel()
-        peers[id] = Peer(id, target.optString("name", "POS"), target.getString("url"), target.optInt("discoveryPort", 8766))
-      } else old.name = target.optString("name", "POS")
+        peers[id] = Peer(id, target.optString("name", "POS"), target.getString("url"), target.optInt("discoveryPort", 8766), role)
+      } else {
+        old.name = target.optString("name", "POS")
+        if (old.role != role) {
+          old.role = role
+          if (old.status == "connected") sendHello(old)
+        }
+      }
     }
     peers.keys.filter { it !in desired }.forEach { peers.remove(it)?.socket?.close(1000, "Removed") }
     refreshCallPermission()
@@ -211,32 +267,78 @@ class CallBridgeForegroundService : Service() {
       if (destroyed || !hasPhonePermissions) return
       val number = incomingNumber?.trim().orEmpty()
       history.onPhoneState(state, number)
+      val now = System.currentTimeMillis()
       when (state) {
         TelephonyManager.CALL_STATE_RINGING -> {
           // A waiting call must not overwrite the original active caller on the POS.
-          if (!callInProgress) { callInProgress = true; answered = false; direction = "in"; phone = number }
-          else if (!answered && phone.isBlank() && number.isNotBlank()) phone = number
+          if (!callInProgress) {
+            callInProgress = true; answered = false; direction = "in"; phone = number
+            liveCalls.add(LiveCall(UUID.randomUUID().toString(), number, "in", "ringing", now))
+          } else if (!answered && phone.isBlank() && number.isNotBlank()) {
+            phone = number
+            liveCalls.lastOrNull { it.endedAt == null }?.let { if (it.phone.isBlank()) it.phone = number }
+          } else if (answered && number.isNotBlank() && liveCalls.none { it.endedAt == null && it.phone == number }) {
+            liveCalls.add(LiveCall(UUID.randomUUID().toString(), number, "in", "waiting", now))
+          }
           announceIfKnown()
         }
         TelephonyManager.CALL_STATE_OFFHOOK -> {
-          if (!callInProgress) { callInProgress = true; direction = "out"; phone = number }
+          if (!callInProgress) {
+            callInProgress = true; direction = "out"; phone = number
+            liveCalls.add(LiveCall(UUID.randomUUID().toString(), number, "out", "active", now))
+          } else {
+            liveCalls.firstOrNull { it.endedAt == null && it.state == "ringing" }?.state = "active"
+          }
           answered = true
           announceIfKnown()
         }
         TelephonyManager.CALL_STATE_IDLE -> {
-          if (announced) broadcast(JSONObject().put("type", "call_end").put("phone", phone))
-          if (lastState != TelephonyManager.CALL_STATE_IDLE) lastCallEndedAt = System.currentTimeMillis()
+          if (announced) broadcastLegacy(JSONObject().put("type", "call_end").put("phone", phone))
+          if (lastState != TelephonyManager.CALL_STATE_IDLE) lastCallEndedAt = now
           callInProgress = false; answered = false; announced = false; phone = ""
+          liveCalls.filter { it.endedAt == null }.forEach { it.endedAt = now; it.state = "ended" }
         }
       }
       lastState = state
+      publishCallState()
     }
+  }
+
+  private fun normalized(raw: String): String {
+    val digits = raw.filter { it.isDigit() }.let { if (it.startsWith("00")) it.drop(2) else it }
+    return if (digits.length == 9) "998$digits" else digits
+  }
+
+  private fun callStateMessage(): String {
+    val now = System.currentTimeMillis()
+    liveCalls.removeAll { it.endedAt != null && now - it.endedAt!! > RECENT_CALLS_MS }
+    val current = liveCalls.filter { it.endedAt == null && it.phone.isNotBlank() }
+    val recent = liveCalls.filter { it.endedAt != null && it.phone.isNotBlank() }.sortedByDescending { it.endedAt }.take(5)
+    while (liveCalls.size > 20) liveCalls.removeAt(0)
+    val calls = JSONArray()
+    for (call in (current + recent).take(10)) {
+      val item = JSONObject().put("id", call.id).put("phone", call.phone.take(40)).put("direction", call.direction)
+        .put("state", call.state).put("since", call.since)
+      names[normalized(call.phone)]?.let { item.put("customerName", it.take(200)) }
+      calls.put(item)
+    }
+    return JSONObject().put("type", "call_state").put("calls", calls).toString()
+  }
+
+  private fun publishCallState() {
+    val message = callStateMessage()
+    for (peer in peers.values) if (peer.status == "connected") peer.socket?.send(message)
+  }
+
+  private fun sendHello(peer: Peer) {
+    peer.socket?.send(JSONObject().put("type", "operator_hello").put("protocol", PROTOCOL).put("role", peer.role)
+      .put("app", "Smart POS Operator ${appVersion()}").toString())
   }
 
   private fun announceIfKnown() {
     if (announced || phone.isBlank()) return
     announced = true
-    broadcast(JSONObject().put("type", "call_start").put("phone", phone).put("direction", direction))
+    broadcastLegacy(JSONObject().put("type", "call_start").put("phone", phone).put("direction", direction))
   }
 
   private fun refreshCallPermission() {
@@ -266,9 +368,23 @@ class CallBridgeForegroundService : Service() {
     refreshCallPermission()
     val now = System.currentTimeMillis()
     for (peer in peers.values) {
+      // A handshake the POS never answers must not leave the phone "connecting" forever.
+      if (peer.status == "connecting" && now - peer.connectingSince > HANDSHAKE_TIMEOUT_MS) {
+        val stuck = peer.socket
+        peer.socket = null; peer.status = "disconnected"; peer.error = "POS javob bermadi; qayta ulanmoqda"; peer.retryAt = now
+        stuck?.cancel()
+      }
       if (peer.status == "disconnected" && now >= peer.retryAt) connect(peer)
       if (peer.status != "connected" && now >= peer.discoveryAt && !peer.discovering) discover(peer)
     }
+    peerHealth = peers.values.map { OperatorPeerHealth(it.id, it.name, it.status == "connected", it.role) }
+    if (peers.isNotEmpty() && lastUptimeTick > 0) {
+      val ratio = peers.values.count { it.status == "connected" }.toDouble() / peers.size
+      val elapsed = now - lastUptimeTick
+      val current = config
+      try { callWorker.execute { supervisor.recordPosUptime(elapsed, ratio, current) } } catch (_: Exception) { }
+    }
+    lastUptimeTick = now
     if (now - lastHeartbeat >= 15_000) {
       lastHeartbeat = now
       OperatorRuntimeStore.update(this) { it.put("lastHeartbeatAt", now).put("phonePermission", hasPhonePermissions) }
@@ -279,13 +395,16 @@ class CallBridgeForegroundService : Service() {
   private fun connect(peer: Peer) {
     if (peers[peer.id] !== peer || destroyed) return
     peer.status = "connecting"
+    peer.connectingSince = System.currentTimeMillis()
     try {
       peer.socket = websocketHttp.newWebSocket(Request.Builder().url(peer.url).build(), object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) { main.post {
           if (destroyed || peers[peer.id] !== peer || peer.socket !== webSocket) { webSocket.cancel(); return@post }
           peer.status = "connected"; peer.attempt = 0; peer.error = null; peer.lastConnectedAt = System.currentTimeMillis()
+          sendHello(peer)
+          webSocket.send(callStateMessage())
           // Only current calls are replayed. Finished calls are never replayed as new orders.
-          if (callInProgress && announced) webSocket.send(JSONObject().put("type", "call_start").put("phone", phone).put("direction", direction).toString())
+          if (callInProgress && announced && peer.role != "cashier") webSocket.send(JSONObject().put("type", "call_start").put("phone", phone).put("direction", direction).toString())
           sendCallRecords(peer)
           updateNotification()
         } }
@@ -296,8 +415,20 @@ class CallBridgeForegroundService : Service() {
             try {
               val message = JSONObject(text)
               when (message.optString("type")) {
-                "customer_name" -> ledgerWorker.execute { try { history.enrichCustomer(message.optString("phone"), message.optString("name")) } catch (_: Exception) { } }
+                "customer_name" -> {
+                  val number = message.optString("phone")
+                  val name = message.optString("name").trim()
+                  if (name.isNotEmpty() && normalized(number).isNotEmpty()) {
+                    if (names[normalized(number)] != name) { names[normalized(number)] = name.take(200); publishCallState() }
+                    ledgerWorker.execute { try { history.enrichCustomer(number, name) } catch (_: Exception) { } }
+                  }
+                }
                 "call_record_ack" -> ledgerWorker.execute { try { history.acknowledge(peer.id, message.optString("id"), message.optLong("revision")) } catch (_: Exception) { } }
+                "order_created" -> {
+                  val orderId = message.opt("orderId")?.toString()?.trim().orEmpty()
+                  val at = message.optLong("at", System.currentTimeMillis()).takeIf { it > 0 } ?: System.currentTimeMillis()
+                  ledgerWorker.execute { try { history.linkOrder(message.optString("phone"), orderId, at) } catch (_: Exception) { } }
+                }
               }
             } catch (_: Exception) { }
           }
@@ -357,9 +488,10 @@ class CallBridgeForegroundService : Service() {
     }
   }
 
-  private fun broadcast(message: JSONObject): Int {
+  /** Protocol 2 messages: only operator POS show the popup; protocol 3 desktops ignore these after hello. */
+  private fun broadcastLegacy(message: JSONObject): Int {
     var count = 0
-    for (peer in peers.values) if (peer.status == "connected" && peer.socket?.send(message.toString()) == true) count++
+    for (peer in peers.values) if (peer.role != "cashier" && peer.status == "connected" && peer.socket?.send(message.toString()) == true) count++
     return count
   }
 
@@ -378,11 +510,22 @@ class CallBridgeForegroundService : Service() {
   fun sendTest(): Int {
     if (callInProgress) throw IllegalStateException("Sinovni qo'ng'iroq tugagach yuboring")
     val testPhone = "+998900000000"
-    val message = JSONObject().put("type", "call_start").put("phone", testPhone).put("direction", "in").put("test", true)
-    val delivered = peers.values.filter { it.status == "connected" && it.socket?.send(message.toString()) == true }.mapNotNull { it.socket }
+    val now = System.currentTimeMillis()
+    val id = "test-$now"
+    fun state(value: String) = JSONObject().put("type", "call_state").put("calls", JSONArray().put(JSONObject()
+      .put("id", id).put("phone", testPhone).put("direction", "in").put("state", value).put("since", now).put("customerName", "Sinov qo‘ng‘irog‘i"))).toString()
+    val legacy = JSONObject().put("type", "call_start").put("phone", testPhone).put("direction", "in").put("test", true).toString()
+    val delivered = peers.values.filter { it.status == "connected" }.filter { peer ->
+      val socket = peer.socket ?: return@filter false
+      socket.send(state("ringing")) && (peer.role == "cashier" || socket.send(legacy))
+    }.map { it to it.socket }
     main.postDelayed({
       val end = JSONObject().put("type", "call_end").put("phone", testPhone).put("test", true).toString()
-      delivered.forEach { it.send(end) }
+      for ((peer, socket) in delivered) {
+        socket?.send(state("ended"))
+        if (peer.role != "cashier") socket?.send(end)
+      }
+      publishCallState()
     }, 1500)
     return delivered.size
   }
@@ -390,7 +533,7 @@ class CallBridgeForegroundService : Service() {
   fun snapshotTargets(): JSONArray {
     val result = JSONArray()
     peers.values.forEach { peer ->
-      val target = JSONObject().put("id", peer.id).put("name", peer.name).put("url", peer.url).put("status", peer.status)
+      val target = JSONObject().put("id", peer.id).put("name", peer.name).put("url", peer.url).put("status", peer.status).put("role", peer.role)
       peer.lastConnectedAt?.let { target.put("lastConnectedAt", it) }
       peer.error?.let { target.put("error", it) }
       result.put(target)
@@ -429,10 +572,13 @@ class CallBridgeForegroundService : Service() {
     peers.values.forEach { it.socket?.cancel() }; peers.clear()
     try { (getSystemService(TELEPHONY_SERVICE) as TelephonyManager).listen(listener, PhoneStateListener.LISTEN_NONE) } catch (_: Exception) { }
     networkCallback?.let { try { (getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(it) } catch (_: Exception) { } }
-    recordings.cancelUploads()
+    supervisor.telegram.cancel()
+    botThread?.interrupt()
     history.close()
-    recordingWorker.shutdownNow(); callWorker.shutdownNow(); ledgerWorker.shutdownNow(); updateWorker.shutdownNow(); networkPool.shutdownNow(); websocketHttp.dispatcher.cancelAll()
+    recordingWorker.shutdownNow(); callWorker.shutdownNow(); ledgerWorker.shutdownNow(); updateWorker.shutdownNow(); telegramWorker.shutdownNow()
+    networkPool.shutdownNow(); websocketHttp.dispatcher.cancelAll()
     if (wakeLock?.isHeld == true) wakeLock?.release()
+    if (wifiLock?.isHeld == true) wifiLock?.release()
     OperatorRuntimeStore.ended(this, "Xizmat to'xtadi")
     super.onDestroy()
   }

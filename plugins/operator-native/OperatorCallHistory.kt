@@ -6,20 +6,14 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import android.provider.CallLog
 import android.telephony.TelephonyManager
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import java.util.TimeZone
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 /** Native call ledger. Answer observations and Android's final call log have distinct provenance. */
-class OperatorCallHistory(private val context: Context) : SQLiteOpenHelper(context, "operator_calls_v1.db", null, 2) {
+class OperatorCallHistory(private val context: Context) : SQLiteOpenHelper(context, "operator_calls_v1.db", null, 3) {
   private val observationSession = UUID.randomUUID().toString()
   private val prefs = context.getSharedPreferences("operator_call_history_v1", Context.MODE_PRIVATE)
   private val deviceId: String = prefs.getString("device_id", null) ?: UUID.randomUUID().toString().also {
@@ -34,23 +28,28 @@ class OperatorCallHistory(private val context: Context) : SQLiteOpenHelper(conte
   private var ringing: String? = null
   private var offhookActive = false
   private var currentState = TelephonyManager.CALL_STATE_IDLE
-  private val http = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS)
-    .callTimeout(45, TimeUnit.SECONDS).retryOnConnectionFailure(false).build()
 
   override fun onCreate(db: SQLiteDatabase) {
-    db.execSQL("CREATE TABLE observations (id TEXT PRIMARY KEY, phone TEXT, started INTEGER, answered INTEGER, ended INTEGER, busy INTEGER, direction TEXT, session TEXT, ambiguous INTEGER NOT NULL DEFAULT 0, call_id TEXT)")
+    db.execSQL("CREATE TABLE observations (id TEXT PRIMARY KEY, phone TEXT, started INTEGER, answered INTEGER, ended INTEGER, busy INTEGER, direction TEXT, session TEXT, ambiguous INTEGER NOT NULL DEFAULT 0, call_id TEXT, busy_with TEXT)")
     db.execSQL("CREATE INDEX observations_match ON observations(started,phone)")
-    db.execSQL("CREATE TABLE calls (id TEXT PRIMARY KEY, phone TEXT, started INTEGER, revision INTEGER, json TEXT NOT NULL)")
+    db.execSQL("CREATE TABLE calls (id TEXT PRIMARY KEY, phone TEXT, started INTEGER, revision INTEGER, json TEXT NOT NULL, reported INTEGER NOT NULL DEFAULT 0)")
     db.execSQL("CREATE INDEX calls_phone ON calls(phone,started)")
     db.execSQL("CREATE TABLE pos_ack (target TEXT, id TEXT, revision INTEGER, PRIMARY KEY(target,id))")
     db.execSQL("CREATE TABLE names (phone TEXT PRIMARY KEY, name TEXT NOT NULL)")
     db.execSQL("CREATE TABLE stats_queue (chat TEXT, id TEXT, revision INTEGER, due INTEGER, attempts INTEGER DEFAULT 0, message_id INTEGER, sent_revision INTEGER DEFAULT 0, error TEXT, PRIMARY KEY(chat,id))")
+    db.execSQL("CREATE TABLE orders (phone TEXT NOT NULL, order_id TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(phone, order_id))")
   }
   override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
     if (oldVersion < 2) {
       db.execSQL("ALTER TABLE observations ADD COLUMN session TEXT")
       db.execSQL("ALTER TABLE observations ADD COLUMN ambiguous INTEGER NOT NULL DEFAULT 0")
       db.execSQL("ALTER TABLE observations ADD COLUMN call_id TEXT")
+    }
+    if (oldVersion < 3) {
+      db.execSQL("ALTER TABLE observations ADD COLUMN busy_with TEXT")
+      // 2.1.x already reported calls through stats_queue; those are handed to the new outbox.
+      db.execSQL("ALTER TABLE calls ADD COLUMN reported INTEGER NOT NULL DEFAULT 0")
+      db.execSQL("CREATE TABLE IF NOT EXISTS orders (phone TEXT NOT NULL, order_id TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(phone, order_id))")
     }
   }
 
@@ -85,9 +84,13 @@ class OperatorCallHistory(private val context: Context) : SQLiteOpenHelper(conte
           // Preserve the observed off-hook state while the aggregate state is RINGING.
           val busy = offhookActive
           if (busy) writableDatabase.update("observations", ContentValues().apply { put("ambiguous", 1) }, "session=? AND ended IS NULL", arrayOf(observationSession))
+          val busyWith = if (busy && primary != null) readableDatabase.rawQuery("SELECT phone FROM observations WHERE id=?", arrayOf(primary!!)).use {
+            if (it.moveToFirst()) it.getString(0) else null
+          } else null
           writableDatabase.insertOrThrow("observations", null, ContentValues().apply {
             put("id", id); put("phone", phone); put("started", now); put("busy", if (busy) 1 else 0); put("direction", "in")
             put("session", observationSession); put("ambiguous", if (busy) 1 else 0)
+            if (!busyWith.isNullOrBlank()) put("busy_with", busyWith)
           })
           ringing = id
           if (primary == null) { primary = id; primaryAnswered = false; primaryIncoming = true }
@@ -125,7 +128,7 @@ class OperatorCallHistory(private val context: Context) : SQLiteOpenHelper(conte
   /** Claim once, against the whole batch: an older unobserved call must not steal a later call's observations. */
   @Synchronized private fun matchObservation(call: FinalCall, batch: List<FinalCall>): JSONObject? {
     return readableDatabase.rawQuery(
-      "SELECT started,answered,ended,busy,ambiguous,id,phone,call_id FROM observations WHERE direction=? AND (call_id=? OR (call_id IS NULL AND started BETWEEN ? AND ? AND (phone=? OR phone='') AND (ended IS NULL OR ended>=?))) ORDER BY CASE WHEN call_id=? THEN 0 ELSE 1 END, ABS(started-?)",
+      "SELECT started,answered,ended,busy,ambiguous,id,phone,call_id,busy_with FROM observations WHERE direction=? AND (call_id=? OR (call_id IS NULL AND started BETWEEN ? AND ? AND (phone=? OR phone='') AND (ended IS NULL OR ended>=?))) ORDER BY CASE WHEN call_id=? THEN 0 ELSE 1 END, ABS(started-?)",
       arrayOf(call.direction, call.id, (call.start - 2000L).toString(), (call.start + 2000L).toString(), normalized(call.phone), call.start.toString(), call.id, call.start.toString())
     ).use { observed ->
       while (observed.moveToNext()) {
@@ -148,6 +151,7 @@ class OperatorCallHistory(private val context: Context) : SQLiteOpenHelper(conte
         return@use JSONObject().put("started", started)
           .put("answered", if (observed.isNull(1)) JSONObject.NULL else observed.getLong(1))
           .put("ended", ended ?: JSONObject.NULL).put("busy", observed.getInt(3) == 1).put("ambiguous", observed.getInt(4) == 1)
+          .put("busyWith", observed.getString(8) ?: "")
       }
       null
     }
@@ -164,14 +168,19 @@ class OperatorCallHistory(private val context: Context) : SQLiteOpenHelper(conte
     val oldComparable = old?.let { JSONObject(it.toString()).apply { remove("revision") } }
     if (oldComparable != null && comparable.toString() == oldComparable.toString()) return
     record.put("revision", (old?.optLong("revision", 0L) ?: 0L) + 1L)
-    writableDatabase.insertWithOnConflict("calls", null, ContentValues().apply {
-      put("id", record.getString("id")); put("phone", normalized(record.optString("phone")))
+    val values = ContentValues().apply {
+      put("phone", normalized(record.optString("phone")))
       put("started", record.getLong("startedAt")); put("revision", record.getLong("revision")); put("json", record.toString())
-    }, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+    // Update in place so the Telegram "reported" marker survives.
+    if (old == null) writableDatabase.insertOrThrow("calls", null, values.apply { put("id", record.getString("id")) })
+    else writableDatabase.update("calls", values, "id=?", arrayOf(record.getString("id")))
   }
 
+  private fun isMissedOutcome(record: JSONObject) = record.optString("outcome") in setOf("missed", "rejected")
+
   /** Final OS rows reconcile outcomes, durations, waiting calls and calls during service downtime. */
-  private fun reconcile() {
+  private fun reconcile(shifts: List<OperatorShift>, tz: TimeZone) {
     val since = maxOf(baseline, prefs.getLong("latest_call", baseline) - TimeUnit.DAYS.toMillis(1))
     val projection = arrayOf(CallLog.Calls._ID, CallLog.Calls.NUMBER, CallLog.Calls.DATE, CallLog.Calls.DURATION, CallLog.Calls.TYPE)
     val cursor = context.contentResolver.query(CallLog.Calls.CONTENT_URI, projection, "${CallLog.Calls.DATE} >= ?", arrayOf(since.toString()), "${CallLog.Calls.DATE} ASC") ?: return
@@ -183,51 +192,83 @@ class OperatorCallHistory(private val context: Context) : SQLiteOpenHelper(conte
     }
     var latest = since
     for (call in batch) {
-        val id = call.id
-        val phone = call.phone
-        val start = call.start
-        val duration = call.duration
-        val type = call.type
-        val direction = call.direction
-        val old = row(id)
-        val record = old ?: JSONObject().put("id", id).put("phone", phone).put("direction", direction).put("startedAt", start)
-        val observation = matchObservation(call, batch)
-        val outcome = when (type) {
-          CallLog.Calls.MISSED_TYPE -> "missed"
-          CallLog.Calls.REJECTED_TYPE -> "rejected"
-          CallLog.Calls.BLOCKED_TYPE -> "blocked"
-          CallLog.Calls.INCOMING_TYPE -> "answered"
-          CallLog.Calls.OUTGOING_TYPE -> if (duration > 0L) "answered" else "unconfirmed"
-          else -> "unknown"
-        }
-        // A waiting caller can stop ringing before the primary call ends; global IDLE cannot time that end.
-        val exactEnd = observation?.optLong("ended", 0L)?.takeIf { value -> value > start && !observation.optBoolean("ambiguous") }
-        val observedAnswer = observation?.optLong("answered", 0L)?.takeIf { value -> value >= start && (exactEnd == null || value <= exactEnd) && direction == "in" && outcome == "answered" }
-        val inferredAnswer = if (outcome == "answered" && exactEnd != null) maxOf(start, exactEnd - duration * 1000L) else null
-        val answer = observedAnswer ?: inferredAnswer
-        record.put("outcome", outcome).put("talkSeconds", duration).put("callLogType", type)
-          .put("answeredAt", answer ?: JSONObject.NULL)
-          .put("endedAt", exactEnd ?: JSONObject.NULL)
-          .put("ringSeconds", if (direction == "in" && observedAnswer != null && observation != null) maxOf(0L, (observedAnswer - observation.getLong("started")) / 1000L) else JSONObject.NULL)
-          .put("ringDurationSeconds", if (direction == "in" && observation != null && exactEnd != null && outcome != "answered") maxOf(0L, (exactEnd - observation.getLong("started")) / 1000L) else JSONObject.NULL)
-          .put("missedWhileBusy", if (outcome in setOf("missed", "rejected") && observation != null) observation.optBoolean("busy") else JSONObject.NULL)
-          .put("timingSource", if (observedAnswer != null) "observed_answer" else if (inferredAnswer != null) "call_log_duration_estimate" else "call_log_only")
-        val name = readableDatabase.rawQuery("SELECT name FROM names WHERE phone=?", arrayOf(normalized(phone))).use { names -> if (names.moveToFirst()) names.getString(0) else null }
-        if (name != null) record.put("customerName", name)
-        saveRecord(record)
-        if (direction == "out" && normalized(phone).isNotBlank()) linkCallbacks(record)
-        latest = maxOf(latest, start)
+      val id = call.id
+      val phone = call.phone
+      val start = call.start
+      val duration = call.duration
+      val type = call.type
+      val direction = call.direction
+      val old = row(id)
+      val record = old ?: JSONObject().put("id", id).put("phone", phone).put("direction", direction).put("startedAt", start)
+      val observation = matchObservation(call, batch)
+      val outcome = when (type) {
+        CallLog.Calls.MISSED_TYPE -> "missed"
+        CallLog.Calls.REJECTED_TYPE -> "rejected"
+        CallLog.Calls.BLOCKED_TYPE -> "blocked"
+        CallLog.Calls.INCOMING_TYPE -> "answered"
+        CallLog.Calls.OUTGOING_TYPE -> if (duration > 0L) "answered" else "unconfirmed"
+        else -> "unknown"
+      }
+      // A waiting caller can stop ringing before the primary call ends; global IDLE cannot time that end.
+      val exactEnd = observation?.optLong("ended", 0L)?.takeIf { value -> value > start && !observation.optBoolean("ambiguous") }
+      val observedAnswer = observation?.optLong("answered", 0L)?.takeIf { value -> value >= start && (exactEnd == null || value <= exactEnd) && direction == "in" && outcome == "answered" }
+      val inferredAnswer = if (outcome == "answered" && exactEnd != null) maxOf(start, exactEnd - duration * 1000L) else null
+      val answer = observedAnswer ?: inferredAnswer
+      record.put("outcome", outcome).put("talkSeconds", duration).put("callLogType", type)
+        .put("answeredAt", answer ?: JSONObject.NULL)
+        .put("endedAt", exactEnd ?: JSONObject.NULL)
+        .put("ringSeconds", if (direction == "in" && observedAnswer != null && observation != null) maxOf(0L, (observedAnswer - observation.getLong("started")) / 1000L) else JSONObject.NULL)
+        .put("ringDurationSeconds", if (direction == "in" && observation != null && exactEnd != null && outcome != "answered") maxOf(0L, (exactEnd - observation.getLong("started")) / 1000L) else JSONObject.NULL)
+        .put("missedWhileBusy", if (outcome in setOf("missed", "rejected") && observation != null) observation.optBoolean("busy") else JSONObject.NULL)
+        .put("busyWith", observation?.optString("busyWith")?.takeIf { it.isNotBlank() && outcome in setOf("missed", "rejected") } ?: JSONObject.NULL)
+        .put("timingSource", if (observedAnswer != null) "observed_answer" else if (inferredAnswer != null) "call_log_duration_estimate" else "call_log_only")
+        .put("observed", observation != null)
+      if (!record.has("shiftId")) annotate(record, shifts, tz)
+      if (record.isNull("orderId")) pendingOrder(normalized(phone), start)?.let { record.put("orderId", it.first).put("orderAt", it.second) }
+      val name = readableDatabase.rawQuery("SELECT name FROM names WHERE phone=?", arrayOf(normalized(phone))).use { names -> if (names.moveToFirst()) names.getString(0) else null }
+      if (name != null) record.put("customerName", name)
+      saveRecord(record)
+      if (normalized(phone).isNotBlank()) {
+        if (direction == "out") linkCallbacks(record)
+        else if (outcome == "answered") linkClientRecall(record)
+      }
+      latest = maxOf(latest, start)
     }
     prefs.edit().putLong("latest_call", latest).remove("last_error").apply()
   }
 
+  /** Shift, closed hours and repeat-caller counts, fixed when the call is first recorded. */
+  private fun annotate(record: JSONObject, shifts: List<OperatorShift>, tz: TimeZone) {
+    val start = record.getLong("startedAt")
+    val slot = OperatorSchedule.slotAt(start, shifts, tz)
+    record.put("closed", slot == null).put("shiftIndex", slot?.shift?.index ?: JSONObject.NULL).put("shiftId", slot?.id ?: JSONObject.NULL)
+    val phone = normalized(record.optString("phone"))
+    if (record.optString("direction") != "in" || phone.isBlank()) return
+    var earlier = 0
+    var missedEarlier = 0
+    readableDatabase.rawQuery("SELECT json FROM calls WHERE phone=? AND started>=? AND started<?",
+      arrayOf(phone, OperatorSchedule.startOfDay(start, tz).toString(), start.toString())).use {
+      while (it.moveToNext()) {
+        val other = JSONObject(it.getString(0))
+        if (other.optString("direction") != "in") continue
+        earlier++
+        if (isMissedOutcome(other)) missedEarlier++
+      }
+    }
+    record.put("callIndexToday", earlier + 1).put("missedToday", missedEarlier + if (isMissedOutcome(record)) 1 else 0)
+  }
+
   @Synchronized private fun linkCallbacks(outgoing: JSONObject) {
+    val outgoingId = outgoing.getString("id")
+    val outgoingStart = outgoing.getLong("startedAt")
     val matches = ArrayList<JSONObject>()
-    readableDatabase.rawQuery("SELECT json FROM calls WHERE phone=? AND started<? ORDER BY started ASC", arrayOf(normalized(outgoing.optString("phone")), outgoing.getLong("startedAt").toString())).use {
+    readableDatabase.rawQuery("SELECT json FROM calls WHERE phone=? AND started<? AND started>=? ORDER BY started ASC",
+      arrayOf(normalized(outgoing.optString("phone")), outgoingStart.toString(), (outgoingStart - OperatorSchedule.DAY_MS).toString())).use {
       while (it.moveToNext()) {
         val missed = JSONObject(it.getString(0))
-        if (missed.optString("outcome") in setOf("missed", "rejected") &&
-          (!missed.optBoolean("callbackConnected", false) || missed.optString("callbackCallId") == outgoing.getString("id"))) matches.add(missed)
+        if (!isMissedOutcome(missed)) continue
+        val open = missed.isNull("resolvedAt") && !missed.optBoolean("callbackConnected", false)
+        if (open || missed.optString("callbackCallId") == outgoingId || missed.optString("resolvedCallId") == outgoingId) matches.add(missed)
       }
     }
     if (matches.isEmpty()) return
@@ -235,23 +276,45 @@ class OperatorCallHistory(private val context: Context) : SQLiteOpenHelper(conte
     val linkedIds = HashSet<String>()
     for (index in 0 until ids.length()) linkedIds.add(ids.getString(index))
     for (missed in matches) {
+      val attempts = missed.optJSONArray("callbackAttemptIds") ?: JSONArray()
+      if ((0 until attempts.length()).none { attempts.getString(it) == outgoingId }) attempts.put(outgoingId)
+      missed.put("callbackAttemptIds", attempts).put("callbackAttempts", attempts.length())
       if (missed.isNull("callbackAttemptAt")) {
-        missed.put("callbackAttemptAt", outgoing.getLong("startedAt"))
-        missed.put("callbackAttemptDelaySeconds", if (!missed.isNull("endedAt")) maxOf(0L, (outgoing.getLong("startedAt") - missed.getLong("endedAt")) / 1000L) else JSONObject.NULL)
+        missed.put("callbackAttemptAt", outgoingStart)
+        missed.put("callbackAttemptDelaySeconds", if (!missed.isNull("endedAt")) maxOf(0L, (outgoingStart - missed.getLong("endedAt")) / 1000L) else JSONObject.NULL)
       }
       if (outgoing.optString("outcome") == "answered") {
         val connected = outgoing.optLong("answeredAt", 0L).takeIf { it > 0L }
         missed.put("callbackConnected", true)
           .put("callbackConnectedAt", connected ?: JSONObject.NULL)
-          .put("callbackCallId", outgoing.getString("id"))
+          .put("callbackCallId", outgoingId)
           .put("callbackDelaySeconds", if (connected != null && !missed.isNull("endedAt")) maxOf(0L, (connected - missed.getLong("endedAt")) / 1000L) else JSONObject.NULL)
-        // Even if exact answer timestamp is unavailable, don't assign a later call as first success.
+        if (missed.isNull("resolvedAt") || missed.optString("resolvedCallId") == outgoingId) {
+          missed.put("resolvedBy", "operator").put("resolvedAt", connected ?: outgoingStart)
+            .put("resolvedCallId", outgoingId).put("resolvedTalkSeconds", outgoing.optLong("talkSeconds"))
+        }
       }
       if (linkedIds.add(missed.getString("id"))) ids.put(missed.getString("id"))
       saveRecord(missed)
     }
-    outgoing.put("callbackForIds", ids)
+    outgoing.put("callbackForIds", ids).put("callbackForAt", matches.minOf { it.getLong("startedAt") })
     saveRecord(outgoing)
+  }
+
+  /** The client called again and was answered: earlier missed calls from that number are solved. */
+  @Synchronized private fun linkClientRecall(incoming: JSONObject) {
+    val start = incoming.getLong("startedAt")
+    val records = ArrayList<JSONObject>()
+    readableDatabase.rawQuery("SELECT json FROM calls WHERE phone=? AND started<? AND started>=?",
+      arrayOf(normalized(incoming.optString("phone")), start.toString(), (start - OperatorSchedule.DAY_MS).toString())).use {
+      while (it.moveToNext()) records.add(JSONObject(it.getString(0)))
+    }
+    for (missed in records) {
+      if (!isMissedOutcome(missed) || !missed.isNull("resolvedAt") || missed.optBoolean("callbackConnected", false)) continue
+      missed.put("resolvedBy", "client").put("resolvedAt", incoming.optLong("answeredAt", 0L).takeIf { it > 0L } ?: start)
+        .put("resolvedCallId", incoming.getString("id")).put("resolvedTalkSeconds", incoming.optLong("talkSeconds"))
+      saveRecord(missed)
+    }
   }
 
   @Synchronized fun enrichCustomer(phone: String, name: String) {
@@ -264,6 +327,92 @@ class OperatorCallHistory(private val context: Context) : SQLiteOpenHelper(conte
       while (it.moveToNext()) records.add(JSONObject(it.getString(0)))
     }
     for (record in records) saveRecord(record.put("customerName", clean))
+  }
+
+  @Synchronized fun customerName(phone: String): String? = readableDatabase.rawQuery("SELECT name FROM names WHERE phone=?", arrayOf(normalized(phone))).use {
+    if (it.moveToFirst()) it.getString(0) else null
+  }
+
+  /** The POS saved an order with this phone number: link it to the latest call within three hours. */
+  @Synchronized fun linkOrder(phone: String, orderId: String, at: Long) {
+    val key = normalized(phone)
+    val id = orderId.trim().take(40)
+    if (key.isBlank() || id.isBlank()) return
+    writableDatabase.insertWithOnConflict("orders", null, ContentValues().apply { put("phone", key); put("order_id", id); put("at", at) }, SQLiteDatabase.CONFLICT_IGNORE)
+    val record = readableDatabase.rawQuery("SELECT json FROM calls WHERE phone=? AND started<=? AND started>=? ORDER BY started DESC LIMIT 1",
+      arrayOf(key, (at + 60_000L).toString(), (at - 3 * 3_600_000L).toString())).use { if (it.moveToFirst()) JSONObject(it.getString(0)) else null } ?: return
+    if (!record.isNull("orderId")) return
+    saveRecord(record.put("orderId", id).put("orderAt", at))
+  }
+
+  private fun pendingOrder(phone: String, start: Long): Pair<String, Long>? {
+    if (phone.isBlank()) return null
+    return readableDatabase.rawQuery("SELECT order_id,at FROM orders WHERE phone=? AND at>=? AND at<=? ORDER BY at ASC LIMIT 1",
+      arrayOf(phone, (start - 60_000L).toString(), (start + 3 * 3_600_000L).toString())).use { if (it.moveToFirst()) Pair(it.getString(0), it.getLong(1)) else null }
+  }
+
+  @Synchronized fun update(id: String, change: (JSONObject) -> Unit): JSONObject? {
+    val record = row(id) ?: return null
+    change(record)
+    saveRecord(record)
+    return row(id)
+  }
+
+  @Synchronized fun get(id: String): JSONObject? = row(id)
+
+  private fun query(sql: String, args: Array<String>): List<JSONObject> {
+    val list = ArrayList<JSONObject>()
+    readableDatabase.rawQuery(sql, args).use { while (it.moveToNext()) list.add(JSONObject(it.getString(0))) }
+    return list
+  }
+
+  @Synchronized fun between(from: Long, to: Long): List<JSONObject> =
+    query("SELECT json FROM calls WHERE started>=? AND started<? ORDER BY started ASC", arrayOf(from.toString(), to.toString()))
+
+  @Synchronized fun recentMissed(since: Long): List<JSONObject> = between(since, Long.MAX_VALUE).filter { isMissedOutcome(it) }
+
+  @Synchronized fun numberHistory(phone: String, limit: Int): List<JSONObject> =
+    query("SELECT json FROM calls WHERE phone=? ORDER BY started DESC LIMIT ?", arrayOf(normalized(phone), limit.toString()))
+
+  /** Calls whose latest revision has not been handed to the Telegram outbox yet. */
+  @Synchronized fun unreported(since: Long, limit: Int): List<JSONObject> =
+    query("SELECT json FROM calls WHERE started>=? AND reported<revision ORDER BY started ASC LIMIT ?", arrayOf(since.toString(), limit.toString()))
+
+  @Synchronized fun markReported(id: String, revision: Long) {
+    writableDatabase.execSQL("UPDATE calls SET reported=? WHERE id=? AND reported<?", arrayOf(revision, id, revision))
+  }
+
+  /** The best call for a Samsung recording: same number (if known) and closest start. */
+  @Synchronized fun findForRecording(phone: String?, at: Long): JSONObject? {
+    val candidates = if (!phone.isNullOrBlank()) query("SELECT json FROM calls WHERE phone=? AND started>=? AND started<=?",
+      arrayOf(normalized(phone), (at - 3 * 3_600_000L).toString(), (at + 5 * 60_000L).toString()))
+      else between(at - 3 * 3_600_000L, at + 5 * 60_000L)
+    return candidates.filter { it.optString("outcome") == "answered" }
+      .filter { call -> val end = call.getLong("startedAt") + call.optLong("talkSeconds") * 1000L + 120_000L; at <= end && at >= call.getLong("startedAt") - 120_000L }
+      .minByOrNull { kotlin.math.abs(it.getLong("startedAt") - at) }
+  }
+
+  /** Messages sent by 2.1.x: (chat, callId, messageId, sentRevision). */
+  @Synchronized fun legacyReports(): List<Array<Any>> {
+    val list = ArrayList<Array<Any>>()
+    readableDatabase.rawQuery("SELECT chat,id,message_id,sent_revision FROM stats_queue WHERE message_id IS NOT NULL", null).use {
+      while (it.moveToNext()) list.add(arrayOf(it.getString(0), it.getString(1), it.getLong(2), it.getLong(3)))
+    }
+    return list
+  }
+
+  /** Start of the Telegram report window, or null while reports are off. Re-enabling starts a new window. */
+  @Synchronized fun reportWindow(telegram: JSONObject): Long? {
+    if (!telegram.optBoolean("sendCallStats", false)) {
+      prefs.edit().putBoolean("stats_enabled", false).apply()
+      return null
+    }
+    val epoch = telegram.optString("_statsBaseline")
+    if (!prefs.getBoolean("stats_enabled", false) || prefs.getString("stats_epoch", "") != epoch) {
+      prefs.edit().putBoolean("stats_enabled", true).putString("stats_epoch", epoch)
+        .putLong("stats_since", telegram.optLong("_statsBaselineAt", System.currentTimeMillis())).commit()
+    }
+    return prefs.getLong("stats_since", System.currentTimeMillis())
   }
 
   @Synchronized fun pendingRecords(targetId: String): List<JSONObject> {
@@ -285,140 +434,43 @@ class OperatorCallHistory(private val context: Context) : SQLiteOpenHelper(conte
     }, SQLiteDatabase.CONFLICT_REPLACE)
   }
 
-  /** Runs on the service worker; HTTP does not hold the observation/ledger lock. */
-  fun tick(telegram: JSONObject) {
-    try { reconcile() } catch (_: SecurityException) {
+  /** Reads Android's final call log; runs on the service worker. */
+  fun tick(shifts: List<OperatorShift> = OperatorSchedule.DEFAULT_SHIFTS, tz: TimeZone = TimeZone.getDefault()) {
+    try { reconcile(shifts, tz) } catch (_: SecurityException) {
       prefs.edit().putString("last_error", "Qo'ng'iroqlar tarixiga ruxsat kerak").apply()
     } catch (_: Exception) { prefs.edit().putString("last_error", "Qo'ng'iroqlar tarixini o'qib bo'lmadi").apply() }
-    if (!telegram.optBoolean("sendCallStats", false)) {
-      prefs.edit().putBoolean("stats_enabled", false).remove("stats_error").apply()
-      return
-    }
-    val chat = telegram.optString("statsChatId")
-    val token = telegram.optString("botToken")
-    if (chat.isBlank() || token.isBlank()) return
-    val epoch = telegram.optString("_statsBaseline")
-    val changed = !prefs.getBoolean("stats_enabled", false) || prefs.getString("stats_epoch", "") != epoch || prefs.getString("stats_chat", "") != chat
-    if (changed) prefs.edit().putBoolean("stats_enabled", true).putString("stats_chat", chat).putString("stats_epoch", epoch)
-      .putLong("stats_since", telegram.optLong("_statsBaselineAt", System.currentTimeMillis()))
-      .remove("stats_error").remove("stats_last_sent").commit()
-    val since = prefs.getLong("stats_since", System.currentTimeMillis())
-    synchronized(this) {
-      readableDatabase.rawQuery("SELECT id,revision FROM calls WHERE started>=?", arrayOf(since.toString())).use {
-        while (it.moveToNext()) {
-          val updated = writableDatabase.update("stats_queue", ContentValues().apply { put("revision", it.getLong(1)) }, "chat=? AND id=?", arrayOf(chat, it.getString(0)))
-          if (updated == 0) writableDatabase.insertOrThrow("stats_queue", null, ContentValues().apply {
-            put("chat", chat); put("id", it.getString(0)); put("revision", it.getLong(1)); put("due", System.currentTimeMillis() + 5000L)
-          })
-        }
-      }
-    }
-    // Drain a backlog without exceeding Telegram's ~20 messages per minute per group (tick = 15 s).
-    var sent = 0
-    while (sent < 4 && sendNext(chat, token, since)) sent++
-  }
-
-  /** After a restart or reconnect, make every unsent report due immediately. */
-  @Synchronized fun retryNow() {
-    writableDatabase.execSQL("UPDATE stats_queue SET due=0 WHERE sent_revision<revision")
-  }
-
-  private fun report(record: JSONObject): String {
-    val fmt = SimpleDateFormat("dd.MM.yyyy HH:mm:ss", Locale("uz"))
-    fun stamp(key: String): String = record.optLong(key, 0L).takeIf { it > 0L }?.let { fmt.format(Date(it)) } ?: "aniqlanmadi"
-    val outcome = when (record.optString("outcome")) {
-      "answered" -> if (record.optString("direction") == "in") "Qabul qilingan qo'ng'iroq" else "Chiquvchi suhbat"
-      "missed" -> "O'tkazib yuborilgan qo'ng'iroq"
-      "rejected" -> "Rad etilgan qo'ng'iroq"
-      "blocked" -> "Bloklangan qo'ng'iroq"
-      "unconfirmed" -> "Chiquvchi urinish — suhbat tasdiqlanmadi"
-      else -> "Qo'ng'iroq ma'lumotlari"
-    }
-    return buildString {
-      append("☎️ ").append(outcome).append('\n')
-      append("Mijoz: ").append(record.optString("customerName").ifBlank { "Ism topilmadi" }).append('\n')
-      append("Raqam: ").append(record.optString("phone").ifBlank { "Yashirin raqam" }).append('\n')
-      append("Boshlangan: ").append(stamp("startedAt")).append('\n')
-      if (record.optString("direction") == "in" && record.optString("outcome") == "answered") {
-        append("Javob berish: ").append(if (record.isNull("ringSeconds")) "aniqlanmadi" else "${record.optLong("ringSeconds")} soniya").append('\n')
-      }
-      if (!record.isNull("ringDurationSeconds")) append("Jiringlagan: ").append(record.optLong("ringDurationSeconds")).append(" soniya\n")
-      append("Suhbat: ").append(record.optLong("talkSeconds")).append(" soniya\n")
-      if (record.optString("outcome") in setOf("missed", "rejected")) {
-        append("O'sha paytda boshqa qo'ng'iroq: ").append(if (record.isNull("missedWhileBusy")) "aniqlanmadi" else if (record.optBoolean("missedWhileBusy")) "ha (kuzatilgan)" else "kuzatilmadi").append('\n')
-        if (!record.isNull("callbackAttemptAt")) {
-          append("Qayta terildi: ").append(stamp("callbackAttemptAt"))
-          if (!record.isNull("callbackAttemptDelaySeconds")) append(" · ").append(record.optLong("callbackAttemptDelaySeconds")).append(" soniyadan keyin")
-          else append(" · kutish muddati aniqlanmadi")
-          append('\n')
-        } else append("Qayta qo'ng'iroq: hali qayd etilmagan\n")
-        if (record.optBoolean("callbackConnected", false)) {
-          append("Qayta suhbat: tasdiqlangan")
-          if (!record.isNull("callbackDelaySeconds")) append(" · ").append(record.optLong("callbackDelaySeconds")).append(" soniyadan keyin (taxminiy)")
-          append('\n')
-        } else if (!record.isNull("callbackAttemptAt")) append("Qayta suhbat: hali tasdiqlanmagan\n")
-        append("Javobsiz qolish sababi avtomatik aniqlanmaydi.\n")
-      }
-      if (record.optString("timingSource") == "call_log_only") append("Aniq javob/tugash vaqti kuzatilmagan.\n")
-      append("ID: ").append(record.getString("id").takeLast(16))
-    }.take(4000)
-  }
-
-  /** Sends one due report; true only when Telegram accepted it. */
-  private fun sendNext(chat: String, token: String, since: Long): Boolean {
-    val item = synchronized(this) {
-      readableDatabase.rawQuery("SELECT q.id,q.revision,q.attempts,q.message_id,c.json FROM stats_queue q JOIN calls c ON c.id=q.id WHERE q.chat=? AND c.started>=? AND q.sent_revision<q.revision AND q.due<=? ORDER BY c.started ASC LIMIT 1", arrayOf(chat, since.toString(), System.currentTimeMillis().toString())).use {
-        if (!it.moveToFirst()) null else JSONObject().put("id", it.getString(0)).put("revision", it.getLong(1)).put("attempts", it.getInt(2))
-          .put("message", if (it.isNull(3)) JSONObject.NULL else it.getLong(3)).put("record", JSONObject(it.getString(4)))
-      }
-    } ?: return false
-    val editing = !item.isNull("message")
-    val body = JSONObject().put("chat_id", chat).put("text", report(item.getJSONObject("record")))
-    if (editing) body.put("message_id", item.getLong("message"))
-    val method = if (editing) "editMessageText" else "sendMessage"
-    var retrySeconds = minOf(3600L, 15L shl minOf(item.optInt("attempts"), 8))
-    var error = "Telegramga hisobot yuborilmadi; qayta uriniladi"
-    try {
-      val request = Request.Builder().url("https://api.telegram.org/bot$token/$method")
-        .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType())).build()
-      http.newCall(request).execute().use { response ->
-        val result = JSONObject(response.body?.string() ?: "{}")
-        if (result.optBoolean("ok") || (editing && result.optString("description").contains("message is not modified"))) {
-          synchronized(this) {
-            writableDatabase.update("stats_queue", ContentValues().apply {
-              put("sent_revision", item.getLong("revision")); put("attempts", 0); putNull("error")
-              if (!editing) put("message_id", result.getJSONObject("result").getLong("message_id"))
-            }, "chat=? AND id=?", arrayOf(chat, item.getString("id")))
-          }
-          prefs.edit().remove("stats_error").putLong("stats_last_sent", System.currentTimeMillis()).apply()
-          return true
-        }
-        retrySeconds = result.optJSONObject("parameters")?.optLong("retry_after", retrySeconds) ?: retrySeconds
-        if (response.code == 401 || response.code == 403) { retrySeconds = 3600L; error = "Hisobot guruhi yoki bot tokenini tekshiring" }
-        else if (response.code == 400) { retrySeconds = 3600L; error = "Hisobot guruhi sozlamalarini va bot a'zoligini tekshiring" }
-      }
-    } catch (_: Exception) { /* Never expose token-bearing URLs from exception messages. */ }
-    synchronized(this) {
-      writableDatabase.update("stats_queue", ContentValues().apply {
-        put("attempts", item.getInt("attempts") + 1); put("due", System.currentTimeMillis() + maxOf(1L, retrySeconds) * 1000L); put("error", error)
-      }, "chat=? AND id=?", arrayOf(chat, item.getString("id")))
-    }
-    prefs.edit().putString("stats_error", error).apply()
-    return false
   }
 
   @Synchronized fun snapshot(): JSONObject {
     val count = readableDatabase.rawQuery("SELECT COUNT(*) FROM calls", null).use { it.moveToFirst(); it.getLong(0) }
-    val pending = if (!prefs.getBoolean("stats_enabled", false)) 0L else readableDatabase.rawQuery(
-      "SELECT COUNT(*) FROM stats_queue q JOIN calls c ON c.id=q.id WHERE q.chat=? AND c.started>=? AND q.sent_revision<q.revision",
-      arrayOf(prefs.getString("stats_chat", "") ?: "", prefs.getLong("stats_since", Long.MAX_VALUE).toString())
-    ).use { it.moveToFirst(); it.getLong(0) }
-    return JSONObject().put("callCount", count).put("statsPending", pending).put("lastError", prefs.getString("last_error", null))
-      .put("statsError", prefs.getString("stats_error", null)).put("statsLastSentAt", prefs.getLong("stats_last_sent", 0L))
+    return JSONObject().put("callCount", count).put("lastError", prefs.getString("last_error", null))
   }
 
-  override fun close() {
-    http.dispatcher.cancelAll()
-    super.close()
+  companion object {
+    private fun longOrNull(r: JSONObject, key: String): Long? = if (r.isNull(key)) null else r.optLong(key)
+
+    /** Ledger JSON → report view. Older 2.1.x records simply lack the newer fields. */
+    fun view(r: JSONObject): OperatorCallView {
+      val connected = r.optBoolean("callbackConnected", false)
+      return OperatorCallView(
+        id = r.getString("id"), phone = r.optString("phone"), direction = r.optString("direction", "in"),
+        outcome = r.optString("outcome", "unknown"), startedAt = r.getLong("startedAt"),
+        customerName = r.optString("customerName").takeIf { it.isNotBlank() },
+        endedAt = longOrNull(r, "endedAt"), ringSeconds = longOrNull(r, "ringSeconds"), ringDurationSeconds = longOrNull(r, "ringDurationSeconds"),
+        talkSeconds = r.optLong("talkSeconds"),
+        timingObserved = r.optBoolean("observed", true) || r.optString("direction") == "out" || r.optString("outcome") == "blocked",
+        closed = r.optBoolean("closed", false), shiftIndex = if (r.isNull("shiftIndex")) null else r.optInt("shiftIndex"),
+        busyWith = r.optString("busyWith").takeIf { it.isNotBlank() && it != "null" },
+        missedWhileBusy = if (r.isNull("missedWhileBusy")) null else r.optBoolean("missedWhileBusy"),
+        callbackAttempts = r.optInt("callbackAttempts", if (r.isNull("callbackAttemptAt")) 0 else 1),
+        firstCallbackAt = longOrNull(r, "callbackAttemptAt"),
+        resolvedBy = r.optString("resolvedBy").takeIf { it.isNotBlank() } ?: if (connected) "operator" else null,
+        resolvedAt = longOrNull(r, "resolvedAt") ?: if (connected) (longOrNull(r, "callbackConnectedAt") ?: longOrNull(r, "callbackAttemptAt")) else null,
+        resolvedTalkSeconds = longOrNull(r, "resolvedTalkSeconds"), lostAt = longOrNull(r, "lostAt"), managerAlertAt = longOrNull(r, "managerAlertAt"),
+        callIndexToday = r.optInt("callIndexToday", 1), missedToday = r.optInt("missedToday", 0),
+        orderId = r.optString("orderId").takeIf { it.isNotBlank() && !r.isNull("orderId") },
+        smsSentAt = longOrNull(r, "smsSentAt"), callbackForAt = longOrNull(r, "callbackForAt"),
+      )
+    }
   }
 }
