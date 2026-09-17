@@ -40,22 +40,25 @@ class OperatorSms(private val context: Context) {
       prefs.edit().putString("error", "Kunlik SMS chegarasi ($dailyCap) tugadi").apply()
       return false
     }
+    keys.put(key, now)
+    // Keep a week of keys: enough for closed-period and per-call deduplication.
+    val trimmed = JSONObject()
+    for (name in keys.keys()) if (now - keys.optLong(name) < 7 * OperatorSchedule.DAY_MS) trimmed.put(name, keys.optLong(name))
+    val today = OperatorSchedule.dateTag(now, tz)
+    // Recorded before sending: a restart right after sending must never send the same SMS again.
+    prefs.edit().putString("keys", trimmed.toString()).putString("day", today).putInt("count", sentToday(tz) + 1).commit()
     try {
       @Suppress("DEPRECATION")
       val manager = if (Build.VERSION.SDK_INT >= 31) context.getSystemService(SmsManager::class.java) else SmsManager.getDefault()
       val safe = OperatorReports.smsSafe(text)
       manager.sendMultipartTextMessage(phone, null, manager.divideMessage(safe), null, null)
     } catch (_: Exception) {
-      prefs.edit().putString("error", "SMS yuborilmadi; SIM karta va balansni tekshiring").apply()
+      trimmed.remove(key)
+      prefs.edit().putString("keys", trimmed.toString()).putInt("count", maxOf(0, sentToday(tz) - 1))
+        .putString("error", "SMS yuborilmadi; SIM karta va balansni tekshiring").commit()
       return false
     }
-    keys.put(key, now)
-    // Keep a week of keys: enough for closed-period and per-call deduplication.
-    val trimmed = JSONObject()
-    for (name in keys.keys()) if (now - keys.optLong(name) < 7 * OperatorSchedule.DAY_MS) trimmed.put(name, keys.optLong(name))
-    val today = OperatorSchedule.dateTag(now, tz)
-    prefs.edit().putString("keys", trimmed.toString()).putString("day", today).putInt("count", sentToday(tz) + 1)
-      .putLong("last_sent", now).remove("error").apply()
+    prefs.edit().putLong("last_sent", now).remove("error").apply()
     return true
   }
 

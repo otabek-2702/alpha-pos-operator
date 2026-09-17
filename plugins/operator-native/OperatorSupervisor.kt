@@ -109,7 +109,8 @@ class OperatorSupervisor(private val context: Context, private val history: Oper
     val o = json("chat_overrides")
     for (key in o.keys().asSequence().toList()) if (o.optString(key) == from) o.put(key, to)
     o.put(from, to)
-    prefs.edit().putString("chat_overrides", o.toString()).apply()
+    // Written before the next post: later rows must use the new chat ID.
+    prefs.edit().putString("chat_overrides", o.toString()).commit()
   }
 
   override fun delivered(key: String, chat: String, messageId: Long) {
@@ -159,7 +160,7 @@ class OperatorSupervisor(private val context: Context, private val history: Oper
     val now = System.currentTimeMillis()
     prefs.edit().putString("recordings_chat", s.recordingsChat).apply()
     migrateLegacy(s)
-    step { reportCalls(s) }
+    step { reportCalls(s, now) }
     step { lifecycle(s, now) }
     step { deliverRecordings(s, now) }
     step { shiftReports(s, now) }
@@ -185,36 +186,64 @@ class OperatorSupervisor(private val context: Context, private val history: Oper
     prefs.edit().putBoolean("legacy_migrated", true).apply()
   }
 
-  private fun reportCalls(s: OperatorSettings) {
+  private fun reportCalls(s: OperatorSettings, now: Long) {
     val since = history.reportWindow(s.telegram) ?: return
-    for (record in history.unreported(since, 40)) {
-      val view = OperatorCallHistory.view(record)
-      val revision = record.optLong("revision")
-      telegram.post("call:${view.id}", reportChats(s, view.startedAt), OperatorReports.callHtml(view, tz, s.lostMs), revision)
-      history.markReported(view.id, revision)
+    repeat(10) {
+      val batch = history.unreported(since, 40)
+      for (record in batch) {
+        val view = OperatorCallHistory.view(record)
+        val revision = record.optLong("revision")
+        // A late change to an old call (for example a customer name) is not posted again as a new message.
+        if (now - view.startedAt < 20 * OperatorSchedule.DAY_MS) {
+          telegram.post("call:${view.id}", reportChats(s, view.startedAt), OperatorReports.callHtml(view, tz, s.lostMs), revision)
+        }
+        history.markReported(view.id, revision)
+      }
+      if (batch.size < 40) return
     }
   }
 
+  private fun numberKey(phone: String) = phone.filter { it.isDigit() }.takeLast(9)
+
   private fun lifecycle(s: OperatorSettings, now: Long) {
     val since = maxOf(prefs.getLong("lifecycle_since", now), now - 12 * 3_600_000L)
-    for (record in history.recentMissed(since)) {
-      val view = OperatorCallHistory.view(record)
+    val missed = history.recentMissed(since).map { OperatorCallHistory.view(it) }
+    // A call in progress may be the callback (its number is known only after it ends) or the client calling again.
+    val open = if (environment.callActive) history.openCalls() else emptyList()
+    // One alert per waiting client: redials of the same number do not alert again.
+    val alerted = missed.filter { it.resolvedAt == null && it.managerAlertAt != null }.map { numberKey(it.phone) }.toMutableSet()
+    val lost = missed.filter { it.resolvedAt == null && it.lostAt != null }.map { numberKey(it.phone) }.toMutableSet()
+    for (view in missed) {
       if (view.resolvedAt != null) { OperatorCallbackReminder.cancel(context, view.id); continue }
       if (view.closed) { closedSms(s, view, now); continue }
+      val number = numberKey(view.phone)
+      if (number.isEmpty()) continue   // A hidden number cannot be called back.
+      if (open.any { it.started >= view.startedAt && (it.direction == "out" || numberKey(it.phone) == number) }) continue
+      val missedAt = OperatorReports.missedAt(view)
       if (OperatorReports.needsManagerAlert(view, now, s.managerAlertMs)) {
         history.update(view.id) { it.put("managerAlertAt", now) }
-        OperatorCallbackReminder.show(context, view, tz)
-        val duty = onDuty(s, view.startedAt)
-        telegram.post("alert:${view.id}", managerTelegram(duty), OperatorReports.managerAlertHtml(view, tz), 1, editable = false)
-        for (manager in duty.filter { it.sms && it.phone.isNotBlank() }) {
-          sms.send("alert:${view.id}:${manager.id}", OperatorReports.smsPhone(manager.phone), OperatorReports.managerAlertSms(view, tz), s.smsCap, tz)
+        // After downtime, calls that are already stale are only marked, never alerted in a burst.
+        if (number !in alerted && now - missedAt < maxOf(s.lostMs, s.managerAlertMs + 120_000L)) {
+          alerted.add(number)
+          OperatorCallbackReminder.show(context, view, tz)
+          val duty = onDuty(s, view.startedAt)
+          telegram.post("alert:${view.id}", managerTelegram(duty), OperatorReports.managerAlertHtml(view, tz), 1, editable = false)
+          val shift = OperatorSchedule.slotAt(view.startedAt, s.shifts, tz)?.id ?: OperatorSchedule.dateTag(view.startedAt, tz)
+          for (manager in duty.filter { it.sms && it.phone.isNotBlank() }) {
+            // At most one SMS per client, shift and manager.
+            sms.send("alert:$shift:$number:${manager.id}", OperatorReports.smsPhone(manager.phone), OperatorReports.managerAlertSms(view, tz), s.smsCap, tz)
+          }
         }
       }
       if (OperatorReports.becomesLost(view, now, s.lostMs)) {
-        history.update(view.id) { it.put("lostAt", now) }
-        val text = OperatorReports.lostAlertHtml(view.copy(lostAt = now), tz, s.lostMs)
-        telegram.post("lost:${view.id}", reportChats(s, view.startedAt), text, 1, replyToKey = "call:${view.id}", editable = false)
-        telegram.post("lost:${view.id}", managerTelegram(onDuty(s, view.startedAt)), text, 1, editable = false)
+        val lostAt = minOf(now, missedAt + s.lostMs)
+        history.update(view.id) { it.put("lostAt", lostAt) }
+        if (number !in lost && now - missedAt < s.lostMs + 15 * 60_000L) {
+          lost.add(number)
+          val text = OperatorReports.lostAlertHtml(view.copy(lostAt = lostAt), tz, s.lostMs)
+          telegram.post("lost:${view.id}", reportChats(s, view.startedAt), text, 1, replyToKey = "call:${view.id}", editable = false)
+          telegram.post("lost:${view.id}", managerTelegram(onDuty(s, view.startedAt)), text, 1, editable = false)
+        }
       }
     }
   }
@@ -434,7 +463,9 @@ class OperatorSupervisor(private val context: Context, private val history: Oper
       telegram.post(replyKey, listOf(chatId), register(s, chatId, argument), 1, editable = false)
       return
     }
-    val allowed = setOf(s.statsChat, s.backupChat, s.recordingsChat).filter { it.isNotBlank() } + managerChats().values
+    val managerIds = s.managers.map { it.id }.toSet()
+    val allowed = setOf(s.statsChat, s.backupChat, s.recordingsChat).filter { it.isNotBlank() } +
+      managerChats().filterKeys { it in managerIds }.values
     if (chatId !in allowed) return
     val reply = when (command) {
       "/holat" -> statusText(s)
@@ -451,8 +482,14 @@ class OperatorSupervisor(private val context: Context, private val history: Oper
   private fun register(s: OperatorSettings, chatId: String, code: String): String {
     val manager = s.managers.firstOrNull { code.length >= 8 && it.invite == code }
       ?: return "Havola noto‘g‘ri yoki eskirgan. Operator telefonidan yangi havola so‘rang."
-    val chats = json("manager_chats").put(manager.id, chatId)
-    prefs.edit().putString("manager_chats", chats.toString()).apply()
+    val chats = json("manager_chats")
+    val bound = chats.optString(manager.id)
+    // A forwarded link cannot take over a manager who is already connected.
+    if (bound.isNotEmpty() && bound != chatId) {
+      return "Bu havola boshqa Telegram hisobiga ulangan. Operator telefonida menejerni o‘chirib, qayta qo‘shing va yangi havolani yuboring."
+    }
+    chats.put(manager.id, chatId)
+    prefs.edit().putString("manager_chats", chats.toString()).commit()
     return "Salom, <b>${OperatorReports.esc(manager.name)}</b>! Siz Smart Food menejeri sifatida ulandingiz.\n" +
       "Smenangizdagi javobsiz va yo‘qotilgan qo‘ng‘iroqlar hamda smena hisobotlari shu yerga keladi.\n\n$HELP"
   }

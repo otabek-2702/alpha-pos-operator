@@ -10,6 +10,9 @@ object OperatorTelegramChecks {
     val calls = ArrayList<String>()
     var nextId = 100L
     var editFails = false
+    var refuse = false
+    val refused = ArrayList<String>()
+    var onSend: (() -> Unit)? = null
     fun ok(result: Any) = OperatorTelegram.Response(200, JSONObject().put("ok", true).put("result", result))
     fun message(fileId: String? = null): JSONObject = JSONObject().put("message_id", nextId++).also { m ->
       if (fileId != null) m.put("document", JSONObject().put("file_id", fileId))
@@ -21,7 +24,9 @@ object OperatorTelegramChecks {
           "sendMessage" -> if (body.optString("chat_id") == "-7") OperatorTelegram.Response(400, JSONObject().put("ok", false)
             .put("description", "Bad Request: group chat was upgraded to a supergroup chat")
             .put("parameters", JSONObject().put("migrate_to_chat_id", -1007L)))
-            else ok(message())
+            else if (refuse && body.optString("chat_id") == "-403") OperatorTelegram.Response(403, JSONObject().put("ok", false)
+              .put("description", "Forbidden: bot was blocked by the user")).also { refused.add(body.optString("text")) }
+            else { onSend?.invoke(); ok(message()) }
           "editMessageText" -> if (editFails) OperatorTelegram.Response(400, JSONObject().put("ok", false).put("description", "Bad Request: message to edit not found"))
             else ok(message())
           "sendDocument" -> ok(message(fileId = "FILE-1"))
@@ -29,7 +34,7 @@ object OperatorTelegramChecks {
           else -> OperatorTelegram.Response(404, JSONObject().put("ok", false))
         }
       }
-      override fun document(token: String, chat: String, name: String, size: Long, open: () -> InputStream, caption: String): OperatorTelegram.Response {
+      override fun document(token: String, chat: String, name: String, size: Long, open: () -> InputStream, caption: String, html: Boolean): OperatorTelegram.Response {
         calls.add("upload $chat $name")
         return ok(message(fileId = "FILE-1"))
       }
@@ -83,6 +88,29 @@ object OperatorTelegramChecks {
       outbox.post("call:old", listOf("-100main"), "yangi", 4)
       drainAll()
       check(calls.any { it == "editMessageText -100main  55" }) { "Messages from 2.1 keep being edited: $calls" }
+
+      // A chat that refuses the bot does not delay other chats, and is not retried on every reconnect.
+      calls.clear()
+      for (i in 1..70) outbox.post("dm:$i", listOf("-403"), "menejer $i", 1)
+      outbox.post("call:2", listOf("-100main"), "yangi qo‘ng‘iroq", 1)
+      refuse = true
+      outbox.drain("123:test")
+      check(calls.any { it.startsWith("sendMessage -100main") }) { "Other chats are served next to a failing one: $calls" }
+      outbox.retryNow()
+      outbox.drain("123:test")
+      outbox.retryNow()
+      outbox.drain("123:test")
+      check(refused == listOf("menejer 1", "menejer 2", "menejer 3")) { "A refused row waits an hour even after reconnects: $refused" }
+
+      // A revision posted while the first send is in flight edits that message instead of sending a second one.
+      calls.clear()
+      onSend = { outbox.post("call:3", listOf("-100main"), "ikkinchi", 2) }
+      outbox.post("call:3", listOf("-100main"), "birinchi", 1)
+      drainAll()
+      onSend = null
+      check(calls.count { it.startsWith("sendMessage -100main") } == 1 && calls.any { it.startsWith("editMessageText -100main") }) {
+        "An in-flight revision becomes an edit: $calls"
+      }
     } finally {
       outbox.close()
       context.deleteDatabase(name)

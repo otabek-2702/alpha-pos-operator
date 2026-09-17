@@ -36,7 +36,7 @@ class OperatorTelegram(
 
   interface Transport {
     fun json(token: String, method: String, body: JSONObject): Response
-    fun document(token: String, chat: String, name: String, size: Long, open: () -> InputStream, caption: String): Response
+    fun document(token: String, chat: String, name: String, size: Long, open: () -> InputStream, caption: String, html: Boolean): Response
     fun cancel() {}
   }
 
@@ -50,7 +50,7 @@ class OperatorTelegram(
   private val prefs = context.getSharedPreferences(name.removeSuffix(".db"), Context.MODE_PRIVATE)
 
   override fun onCreate(db: SQLiteDatabase) {
-    db.execSQL("CREATE TABLE outbox (key TEXT NOT NULL, chat TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL, revision INTEGER NOT NULL, sent_revision INTEGER NOT NULL DEFAULT 0, message_id INTEGER, file_id TEXT, primary_chat TEXT, due INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, error TEXT, created INTEGER NOT NULL, PRIMARY KEY(key, chat))")
+    db.execSQL("CREATE TABLE outbox (key TEXT NOT NULL, chat TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL, revision INTEGER NOT NULL, sent_revision INTEGER NOT NULL DEFAULT 0, message_id INTEGER, file_id TEXT, primary_chat TEXT, due INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, error TEXT, created INTEGER NOT NULL, hard INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(key, chat))")
     db.execSQL("CREATE INDEX outbox_due ON outbox(sent_revision, due)")
   }
   override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
@@ -81,7 +81,7 @@ class OperatorTelegram(
       })
     } else if (revision > existing) {
       writableDatabase.update("outbox", ContentValues().apply {
-        put("payload", payload.toString()); put("revision", revision); put("due", now); put("attempts", 0); putNull("error")
+        put("payload", payload.toString()); put("revision", revision); put("due", now); put("attempts", 0); putNull("error"); put("hard", 0)
       }, "key=? AND chat=?", arrayOf(key, chat))
     }
   }
@@ -111,36 +111,45 @@ class OperatorTelegram(
   fun lastError(): String? = prefs.getString("error", null)
   fun lastSentAt(): Long = prefs.getLong("last_sent", 0L)
 
-  /** After a restart or reconnect everything unsent is due now. */
-  @Synchronized fun retryNow() { writableDatabase.execSQL("UPDATE outbox SET due=0 WHERE sent_revision<revision") }
+  /** After a restart or reconnect everything unsent is due now, except chats Telegram refused (bot removed or blocked). */
+  @Synchronized fun retryNow() { writableDatabase.execSQL("UPDATE outbox SET due=0 WHERE sent_revision<revision AND hard=0") }
 
   @Synchronized fun renameChat(from: String, to: String) {
     writableDatabase.execSQL("UPDATE OR IGNORE outbox SET chat=? WHERE chat=?", arrayOf(to, from))
+    // A row that already exists for the new chat was posted later, with the same or a newer revision.
+    writableDatabase.delete("outbox", "chat=?", arrayOf(from))
     writableDatabase.execSQL("UPDATE outbox SET primary_chat=? WHERE primary_chat=?", arrayOf(to, from))
   }
 
   private data class Row(val key: String, val chat: String, val kind: String, val payload: JSONObject, val revision: Long,
     val messageId: Long?, val fileId: String?, val primary: String?, val attempts: Int)
 
-  /** Sends due rows, at most one message per chat every 3 seconds. Returns how many were delivered. */
+  /** Sends the oldest due row of each chat, at most one message per chat every 3 seconds. Returns how many were delivered. */
   fun drain(token: String, budget: Int = 8): Int {
     if (token.isBlank()) return 0
     val now = System.currentTimeMillis()
     val rows = synchronized(this) {
-      writableDatabase.delete("outbox", "sent_revision>=revision AND created<?", arrayOf((now - 21 * OperatorSchedule.DAY_MS).toString()))
-      val list = ArrayList<Row>()
-      readableDatabase.rawQuery("SELECT key,chat,kind,payload,revision,message_id,file_id,primary_chat,attempts FROM outbox WHERE sent_revision<revision AND due<=? ORDER BY created LIMIT 60", arrayOf(now.toString())).use {
-        while (it.moveToNext()) list.add(Row(it.getString(0), it.getString(1), it.getString(2), JSONObject(it.getString(3)), it.getLong(4),
-          if (it.isNull(5)) null else it.getLong(5), it.getString(6), it.getString(7), it.getInt(8)))
+      val day = OperatorSchedule.DAY_MS
+      writableDatabase.delete("outbox", "sent_revision>=revision AND created<?", arrayOf((now - 21 * day).toString()))
+      // Unsendable rows do not pile up: refused chats after 3 days, anything else after 30.
+      writableDatabase.delete("outbox", "sent_revision<revision AND ((hard=1 AND created<?) OR created<?)",
+        arrayOf((now - 3 * day).toString(), (now - 30 * day).toString()))
+      val chats = ArrayList<String>()
+      readableDatabase.rawQuery("SELECT chat FROM outbox WHERE sent_revision<revision AND due<=? GROUP BY chat ORDER BY MIN(created)", arrayOf(now.toString())).use {
+        while (it.moveToNext()) chats.add(it.getString(0))
       }
-      list
+      chats.mapNotNull { chat ->
+        readableDatabase.rawQuery("SELECT key,chat,kind,payload,revision,message_id,file_id,primary_chat,attempts FROM outbox WHERE chat=? AND sent_revision<revision AND due<=? ORDER BY created LIMIT 1",
+          arrayOf(chat, now.toString())).use {
+          if (it.moveToFirst()) Row(it.getString(0), it.getString(1), it.getString(2), JSONObject(it.getString(3)), it.getLong(4),
+            if (it.isNull(5)) null else it.getLong(5), it.getString(6), it.getString(7), it.getInt(8)) else null
+        }
+      }
     }
     var delivered = 0
-    val used = HashSet<String>()
     for (row in rows) {
       if (delivered >= budget) break
-      if (row.chat in used || System.currentTimeMillis() - (lastSent[row.chat] ?: 0L) < minIntervalMs) continue
-      used.add(row.chat)
+      if (System.currentTimeMillis() - (lastSent[row.chat] ?: 0L) < minIntervalMs) continue
       if (process(token, row)) delivered++
     }
     return delivered
@@ -151,14 +160,12 @@ class OperatorTelegram(
       val response: Response
       if (row.kind == "document") {
         if (row.messageId != null) {
-          response = transport.json(token, "editMessageCaption", JSONObject().put("chat_id", row.chat).put("message_id", row.messageId)
-            .put("caption", row.payload.optString("text")).put("parse_mode", "HTML"))
+          response = transport.json(token, "editMessageCaption", captionBody(row).put("message_id", row.messageId))
         } else {
           val primaryFile = row.primary?.let { primaryState(row.key, it) }
-          if (primaryFile?.first != null) {
-            response = transport.json(token, "sendDocument", JSONObject().put("chat_id", row.chat).put("document", primaryFile.first)
-              .put("caption", row.payload.optString("text")).put("parse_mode", "HTML"))
-          } else if (primaryFile != null && primaryFile.second < 3) {
+          if (primaryFile?.fileId != null) {
+            response = transport.json(token, "sendDocument", captionBody(row).put("document", primaryFile.fileId))
+          } else if (primaryFile != null && !primaryFile.sent && primaryFile.attempts < 3) {
             defer(row, 15, null)   // Wait for the main chat's upload, then reuse its file.
             return false
           } else {
@@ -185,12 +192,23 @@ class OperatorTelegram(
     return false
   }
 
+  private fun plain(row: Row) = row.payload.optBoolean("plain", false)
+
+  /** HTML text, or the same text without tags after Telegram refused to parse it. */
+  private fun text(row: Row): String = row.payload.optString("text").let {
+    if (plain(row)) it.replace(Regex("<[^>]+>"), "").replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&") else it
+  }
+
   private fun textBody(row: Row): JSONObject {
-    val plain = row.payload.optBoolean("plain", false)
-    val text = row.payload.optString("text").let { if (plain) it.replace(Regex("<[^>]+>"), "").replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&") else it }
-    val body = JSONObject().put("chat_id", row.chat).put("text", text.ifBlank { "—" })
+    val body = JSONObject().put("chat_id", row.chat).put("text", text(row).ifBlank { "—" })
       .put("link_preview_options", JSONObject().put("is_disabled", true))
-    if (!plain) body.put("parse_mode", "HTML")
+    if (!plain(row)) body.put("parse_mode", "HTML")
+    return body
+  }
+
+  private fun captionBody(row: Row): JSONObject {
+    val body = JSONObject().put("chat_id", row.chat).put("caption", text(row))
+    if (!plain(row)) body.put("parse_mode", "HTML")
     return body
   }
 
@@ -200,13 +218,15 @@ class OperatorTelegram(
     val open: () -> InputStream = {
       if (local != null) FileInputStream(local) else context.contentResolver.openInputStream(uri) ?: throw IOException("recording unavailable")
     }
-    return transport.document(token, row.chat, row.payload.getString("name"), row.payload.optLong("size", -1L), open, row.payload.optString("text"))
+    return transport.document(token, row.chat, row.payload.getString("name"), row.payload.optLong("size", -1L), open, text(row), !plain(row))
   }
 
-  /** file_id and attempt count of the main chat's upload. */
-  @Synchronized private fun primaryState(key: String, chat: String): Pair<String?, Int>? =
-    readableDatabase.rawQuery("SELECT file_id,attempts FROM outbox WHERE key=? AND chat=?", arrayOf(key, chat)).use {
-      if (it.moveToFirst()) Pair(it.getString(0), it.getInt(1)) else null
+  private data class PrimaryFile(val fileId: String?, val attempts: Int, val sent: Boolean)
+
+  /** The main chat's upload: its file_id, failed attempts and whether it was sent at all. */
+  @Synchronized private fun primaryState(key: String, chat: String): PrimaryFile? =
+    readableDatabase.rawQuery("SELECT file_id,attempts,sent_revision FROM outbox WHERE key=? AND chat=?", arrayOf(key, chat)).use {
+      if (it.moveToFirst()) PrimaryFile(it.getString(0), it.getInt(1), it.getLong(2) > 0L) else null
     }
 
   private fun handle(token: String, row: Row, response: Response): Boolean {
@@ -216,7 +236,9 @@ class OperatorTelegram(
       val result = json.opt("result")
       val message = result as? JSONObject
       val messageId = message?.optLong("message_id", 0L)?.takeIf { it > 0 } ?: row.messageId
-      val fileId = message?.optJSONObject("document")?.optString("file_id")?.takeIf { it.isNotEmpty() } ?: row.fileId
+      // Telegram may classify an uploaded recording as audio or voice instead of a document.
+      val fileId = listOf("document", "audio", "voice", "video")
+        .firstNotNullOfOrNull { type -> message?.optJSONObject(type)?.optString("file_id")?.takeIf { it.isNotEmpty() } } ?: row.fileId
       markSent(row, messageId, fileId)
       if (row.messageId == null && messageId != null && row.payload.optBoolean("pin")) {
         try { transport.json(token, "pinChatMessage", JSONObject().put("chat_id", row.chat).put("message_id", messageId).put("disable_notification", true)) }
@@ -237,30 +259,35 @@ class OperatorTelegram(
         // Someone deleted the message: send it again as a new one.
         writableDatabase.update("outbox", ContentValues().apply { putNull("message_id"); put("due", 0) }, "key=? AND chat=?", arrayOf(row.key, row.chat))
       }
-      description.contains("can't parse entities") && !row.payload.optBoolean("plain") -> synchronized(this) {
+      description.contains("can't parse entities") && !plain(row) -> synchronized(this) {
         writableDatabase.update("outbox", ContentValues().apply { put("payload", row.payload.put("plain", true).toString()); put("due", 0) },
           "key=? AND chat=?", arrayOf(row.key, row.chat))
       }
       response.code == 429 -> defer(row, parameters?.optLong("retry_after", 30L) ?: 30L, null)
       response.code == 401 || response.code == 403 || response.code == 400 ->
-        defer(row, 3600, "Telegram guruhi yoki bot sozlamasini tekshiring (HTTP ${response.code})")
+        defer(row, 3600, "Telegram guruhi yoki bot sozlamasini tekshiring (HTTP ${response.code})", hard = true)
       else -> defer(row, OperatorRecordingPolicy.retrySeconds(row.attempts), "Telegram vaqtincha mavjud emas (HTTP ${response.code})")
     }
     return false
   }
 
   @Synchronized private fun markSent(row: Row, messageId: Long?, fileId: String?) {
-    writableDatabase.update("outbox", ContentValues().apply {
-      put("sent_revision", row.revision); put("attempts", 0); putNull("error")
+    // The message exists even if a newer revision arrived meanwhile: keep its ID so that revision edits it.
+    val ids = ContentValues().apply {
       if (messageId != null) put("message_id", messageId)
       if (fileId != null) put("file_id", fileId)
+    }
+    if (ids.size() > 0) writableDatabase.update("outbox", ids, "key=? AND chat=?", arrayOf(row.key, row.chat))
+    writableDatabase.update("outbox", ContentValues().apply {
+      put("sent_revision", row.revision); put("attempts", 0); putNull("error"); put("hard", 0)
     }, "key=? AND chat=? AND revision=?", arrayOf(row.key, row.chat, row.revision.toString()))
     prefs.edit().remove("error").putLong("last_sent", System.currentTimeMillis()).apply()
   }
 
-  @Synchronized private fun defer(row: Row, seconds: Long, error: String?) {
+  @Synchronized private fun defer(row: Row, seconds: Long, error: String?, hard: Boolean = false) {
     writableDatabase.update("outbox", ContentValues().apply {
       put("attempts", row.attempts + 1); put("due", System.currentTimeMillis() + seconds.coerceIn(1L, 3600L) * 1000L)
+      put("hard", if (hard) 1 else 0)
       if (error != null) put("error", error)
     }, "key=? AND chat=?", arrayOf(row.key, row.chat))
     if (error != null) prefs.edit().putString("error", error).apply()
@@ -270,9 +297,10 @@ class OperatorTelegram(
 
   class HttpTransport : Transport {
     private val http = OkHttpClient.Builder().connectTimeout(20, TimeUnit.SECONDS).writeTimeout(180, TimeUnit.SECONDS)
-      .readTimeout(60, TimeUnit.SECONDS).callTimeout(240, TimeUnit.SECONDS).retryOnConnectionFailure(false).build()
+      .readTimeout(60, TimeUnit.SECONDS).retryOnConnectionFailure(false).build()
 
-    private fun execute(request: Request): Response = http.newCall(request).execute().use { response ->
+    private fun execute(request: Request, timeoutSeconds: Long = 240L): Response =
+      http.newCall(request).apply { timeout().timeout(timeoutSeconds, TimeUnit.SECONDS) }.execute().use { response ->
       val json = try { JSONObject(response.body?.string() ?: "{}") } catch (_: Exception) { JSONObject() }
       Response(json.optInt("error_code", response.code).takeIf { !json.optBoolean("ok") } ?: response.code, json)
     }
@@ -282,16 +310,19 @@ class OperatorTelegram(
       .url("https://api.telegram.org/bot$token/$method")
       .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType())).build())
 
-    override fun document(token: String, chat: String, name: String, size: Long, open: () -> InputStream, caption: String): Response {
+    override fun document(token: String, chat: String, name: String, size: Long, open: () -> InputStream, caption: String, html: Boolean): Response {
       val file = object : RequestBody() {
         override fun contentType() = "application/octet-stream".toMediaType()
         override fun contentLength() = size
         override fun writeTo(sink: BufferedSink) { open().source().use { sink.writeAll(it) } }
       }
       val body = MultipartBody.Builder().setType(MultipartBody.FORM)
-        .addFormDataPart("chat_id", chat).addFormDataPart("caption", caption).addFormDataPart("parse_mode", "HTML")
+        .addFormDataPart("chat_id", chat).addFormDataPart("caption", caption).addFormDataPart("disable_content_type_detection", "true")
+        .apply { if (html) addFormDataPart("parse_mode", "HTML") }
         .addFormDataPart("document", name.replace('\n', '_').replace('\r', '_'), file).build()
-      return execute(Request.Builder().url("https://api.telegram.org/bot$token/sendDocument").post(body).build())
+      // Slow mobile uplinks: allow about 20 KB/s for long recordings.
+      val seconds = (240L + maxOf(size, 0L) / 20_000L).coerceAtMost(1800L)
+      return execute(Request.Builder().url("https://api.telegram.org/bot$token/sendDocument").post(body).build(), seconds)
     }
 
     override fun cancel() = http.dispatcher.cancelAll()

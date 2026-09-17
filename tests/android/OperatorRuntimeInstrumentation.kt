@@ -230,7 +230,7 @@ class OperatorRuntimeInstrumentation : Instrumentation() {
       check(unknown.isNull("answeredAt") && unknown.isNull("endedAt") && unknown.isNull("missedWhileBusy"))
 
       // 2.2: attempts are counted, the client's own answered call resolves a missed call, POS orders link to calls.
-      val recallPhone = "+998900001011"
+      val recallPhone = "+998900001021"
       val recallMissedAt = System.currentTimeMillis()
       addLog(recallPhone, recallMissedAt, 0, CallLog.Calls.MISSED_TYPE)
       reconcile()
@@ -247,7 +247,7 @@ class OperatorRuntimeInstrumentation : Instrumentation() {
       val stableRevision = recallMissed().getLong("revision")
       reconcile()
       check(recallMissed().getLong("revision") == stableRevision) { "Reconciling again must not change a resolved call" }
-      ledger.linkOrder("900001011", "777", recallMissedAt + 60_000)
+      ledger.linkOrder("900001021", "777", recallMissedAt + 60_000)
       check(ledger.pendingRecords("pos-a").any { it.optString("phone") == recallPhone && it.optString("orderId") == "777" }) { "POS orders link to the latest call of that number" }
       check(recallMissed().getString("id") in ledger.unreported(recallMissedAt - 1, 50).map { it.getString("id") })
       ledger.markReported(recallMissed().getString("id"), recallMissed().getLong("revision"))

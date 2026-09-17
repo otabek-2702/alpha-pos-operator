@@ -1,4 +1,4 @@
-# Smart POS Operator 2.0 — Samsung telefoniga o‘rnatish
+# Smart POS Operator 2.x — Samsung telefoniga o‘rnatish
 
 Ushbu sozlash **Samsung SM-A037F/DS, Android 13, bitta faol SIM-karta** uchun tayyorlangan. Bitta Smart Food filialining barcha POSlari shu telefonga ulanadi. Ovoz yozuvlari va hisobot guruhlari uchun **bitta umumiy bot** ishlatiladi.
 
@@ -30,6 +30,29 @@ Papka, yozuvlar guruhi yoki bot o‘zgartirilsa, shuningdek ovoz yuborish o‘ch
 Holatni **Yordam va ma‘lumot** sahifasidan ko‘rish va **Yangilanishni tekshirish** bilan darhol tekshirish mumkin. Agar Android tasdiq so‘rasa (masalan, “Noma’lum ilovalarni o‘rnatish” ruxsati o‘chirilgan bo‘lsa), bildirishnoma chiqadi — uni bosib o‘rnating.
 
 2.0.1 dan 2.1.0 ga o‘tish bir marta qo‘lda qilinadi (APKni eski ilova ustidan o‘rnating). Keyingi versiyalar avtomatik keladi.
+
+## 2.2.0: hisobotlar, smenalar, menejerlar va SMS
+
+**Bir marta qo‘lda o‘rnatish.** 2.2.0 SMS yuborish ruxsatini qo‘shadi. Android bu ruxsatni faqat APK fayldan (Fayllar ilovasi orqali) o‘rnatilgan ilovaga beradi. Shuning uchun 2.2.0 ni guruhdagi APK fayldan eski ilova ustidan bir marta o‘rnating — sozlamalar saqlanib qoladi. Keyin **Ruxsatlar va batareya** bo‘limida **Asosiy ruxsatlarni berish** ni bosib, **SMS yuborish** va **Qo‘ng‘iroq qilish** ruxsatlarini bering.
+
+**Zaxira guruhi.** Yangi Telegram sozlash QR kodini (**Telegram QR kodini skanerlash**) skanerlang yoki **Zaxira guruhi** maydoniga guruh ID sini kiriting. Bot yuborgan har bir xabarning nusxasi **Smart Food zaxira** guruhiga ham boradi, tahrirlar ham u yerda takrorlanadi.
+
+**Qo‘ng‘iroq hisobotlari.** Har bir qo‘ng‘iroq bitta xabar bo‘lib keladi va holati o‘zgarganda o‘sha xabar tahrirlanadi:
+
+- 🟢 javob berildi yoki hal qilindi (mijoz o‘zi qayta qo‘ng‘iroq qildi yoki operator qayta qo‘ng‘iroq qilib gaplashdi);
+- 🟡 javobsiz, qayta qo‘ng‘iroq kutilmoqda;
+- 🔴 yo‘qotilgan mijoz — 5 daqiqa ichida bog‘lanilmagan (alohida ogohlantirish xabari ham keladi);
+- ⚫ bloklangan raqam (telefon jiringlamagan), ⚪ ish vaqtidan tashqari qo‘ng‘iroq.
+
+Qidirish uchun heshteglar: `#qabul`, `#otkazib`, `#hal_qilindi`, `#yoqotilgan`, `#chiquvchi`, `#bloklangan`, `#yopiq`, `#ovoz`, `#hisobot`, `#ogohlantirish`; sanali variantlari, masalan `#yoqotilgan170926`, shuningdek `#kun170926`, `#smena1`, `#smena2`.
+
+**Ish tartibi va SMS** (bosh sahifa). Smenalar: 08:00–17:00 va 17:00–02:00. Har smena tugaganda statistikali hisobot yuboriladi va guruhda qadab qo‘yiladi. 02:00–08:00 oralig‘idagi qo‘ng‘iroqlar “yopiq vaqt” deb belgilanadi, yo‘qotilgan hisoblanmaydi va ertalabki hisobotda ko‘rsatiladi. **Qo‘ng‘iroq qilganlarga SMS yuborish** yoqilsa, yopiq vaqtda qo‘ng‘iroq qilgan O‘zbekiston mobil raqamlariga har yopiq davrda bir marta SMS yuboriladi (kunlik chegara bilan). Menejerga xabar va “yo‘qotilgan” vaqtlarini shu yerda o‘zgartirish mumkin.
+
+**Menejerlar** (bosh sahifa). **Menejer qo‘shish** → ism va raqam (**Kontaktlardan tanlash**) → ish jadvali: **Har hafta almashadi** (har yakshanba smena almashadi) yoki **Doimiy**. Javobsiz qo‘ng‘iroqqa 1 daqiqada qayta qo‘ng‘iroq qilinmasa, faqat shu smenadagi menejerlarga SMS va Telegram xabari boradi. Telegram uchun menejerning shaxsiy havolasini unga yuboring; u botda **Start** ni bosganda ulanadi va faqat o‘z smenasidagi ogohlantirishlar, yo‘qotilgan mijozlar va smena hisobotini oladi.
+
+**Qo‘shimcha:** javobsiz qo‘ng‘iroqda telefonda “Qo‘ng‘iroq qilish” tugmali eslatma chiqadi; bir kunda qayta-qayta qo‘ng‘iroq qilgan mijoz belgilanadi; POS 5 daqiqadan ko‘p uzilsa, internet uzilsa, batareya kamaysa yoki zaryadlovchi uzilsa va javob berilgan qo‘ng‘iroqning audiosi 10 daqiqada topilmasa, guruhga ogohlantirish boradi. Guruhda bot buyruqlari: `/holat` (hozirgi holat), `/hisobot` (joriy smena), `/raqam 901234567` (raqam tarixi).
+
+**POS turi.** Bosh sahifada har bir POS uchun **Operator** yoki **Kassa** ni tanlang. Operator POS ida qo‘ng‘iroq oynasi ochiladi (buyurtma kiritilayotgan bo‘lsa, oyna o‘rniga yuqorida kichik xabar chiqadi). Kassa POS ida oyna ochilmaydi. Ikkalasida ham buyurtma oynasida hozirgi va so‘nggi qo‘ng‘iroq raqamlari tugma bo‘lib turadi — bir bosishda mijoz raqami kiritiladi. Buning uchun POS dasturi 0.0.17 yoki yangiroq bo‘lishi kerak.
 
 ## Tekshirish va kundalik ishlatish
 

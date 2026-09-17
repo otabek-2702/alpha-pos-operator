@@ -322,11 +322,23 @@ class OperatorCallHistory(private val context: Context) : SQLiteOpenHelper(conte
     if (key.isBlank() || name.isBlank()) return
     val clean = name.take(200)
     writableDatabase.insertWithOnConflict("names", null, ContentValues().apply { put("phone", key); put("name", clean) }, SQLiteDatabase.CONFLICT_REPLACE)
+    // Only recent calls: renaming a regular customer must not resend old reports to POS and Telegram.
     val records = ArrayList<JSONObject>()
-    readableDatabase.rawQuery("SELECT json FROM calls WHERE phone=?", arrayOf(key)).use {
+    readableDatabase.rawQuery("SELECT json FROM calls WHERE phone=? AND started>=?", arrayOf(key, (System.currentTimeMillis() - OperatorSchedule.DAY_MS).toString())).use {
       while (it.moveToNext()) records.add(JSONObject(it.getString(0)))
     }
-    for (record in records) saveRecord(record.put("customerName", clean))
+    for (record in records) if (record.optString("customerName") != clean) saveRecord(record.put("customerName", clean))
+  }
+
+  data class OpenCall(val direction: String, val started: Long, val phone: String)
+
+  /** Calls in progress on this phone right now (outgoing numbers are unknown until the call log has them). */
+  @Synchronized fun openCalls(): List<OpenCall> {
+    val list = ArrayList<OpenCall>()
+    readableDatabase.rawQuery("SELECT direction,started,phone FROM observations WHERE ended IS NULL AND session=?", arrayOf(observationSession)).use {
+      while (it.moveToNext()) list.add(OpenCall(it.getString(0) ?: "", it.getLong(1), it.getString(2) ?: ""))
+    }
+    return list
   }
 
   @Synchronized fun customerName(phone: String): String? = readableDatabase.rawQuery("SELECT name FROM names WHERE phone=?", arrayOf(normalized(phone))).use {
