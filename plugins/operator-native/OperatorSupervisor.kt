@@ -33,6 +33,8 @@ class OperatorSettings(val config: JSONObject, private val overrides: Map<String
   val managerAlertMs = alerts.optInt("managerAfterMinutes", 2).coerceIn(1, 60) * 60_000L
   val lostMs = alerts.optInt("lostAfterMinutes", 5).coerceIn(1, 240) * 60_000L
   val smsCap = alerts.optInt("smsDailyCap", 50).coerceIn(0, 500)
+  /** Recordings confirmed in the Telegram group are deleted from the phone after this many days (0 = right away). */
+  val recordingKeepDays = alerts.optInt("recordingKeepDays", 3).coerceIn(0, 30)
   private val closed = config.optJSONObject("closedSms") ?: JSONObject()
   val closedSmsEnabled = closed.optBoolean("enabled", false)
   val closedSmsText: String = closed.optString("text").trim().ifBlank { DEFAULT_CLOSED_SMS }
@@ -406,7 +408,30 @@ class OperatorSupervisor(private val context: Context, private val history: Oper
       if (now - from >= 2 * 60_000L) telegram.post("net:$from", alertChats, OperatorReports.internetOutageHtml(from, now, tz), 1, editable = false)
     }
     battery(alertChats, now)
+    storage(alertChats + OperatorAdmin.OWNER_CHAT, now)
+    ownerGreeting(s, env, now)
     if (s.audioEnabled) missingAudio(s, alertChats, now)
+  }
+
+  /** Once per app version: tells the built-in owner chat that the phone is connected. */
+  private fun ownerGreeting(s: OperatorSettings, env: OperatorEnvironment, now: Long) {
+    if (s.token.isBlank() || env.appVersion.isBlank() || prefs.getString("owner_greeted", "") == env.appVersion) return
+    prefs.edit().putString("owner_greeted", env.appVersion).apply()
+    telegram.post("owner:hello:${env.appVersion}", listOf(OperatorAdmin.OWNER_CHAT),
+      "✅ Operator telefoni ${OperatorReports.esc(env.appVersion)} ulandi. Siz doimiy boshqaruvchisiz.\n" +
+        "Bo‘sh xotira: ${OperatorRecordings.formatBytes(OperatorRecordings.freeBytes())}\n\n${OperatorAdmin.HELP}", 1, editable = false)
+  }
+
+  /** Alerts once when free storage is low (the phone may stop recording calls); re-arms above 2 GB. */
+  private fun storage(chats: List<String>, now: Long) {
+    val free = OperatorRecordings.freeBytes()
+    if (free < 0) return
+    if (free < OperatorRecordings.LOW_STORAGE_BYTES && !prefs.getBoolean("storage_low_alerted", false)) {
+      prefs.edit().putBoolean("storage_low_alerted", true).apply()
+      telegram.post("storage:low:$now", chats.distinct(), "💾 <b>Telefon xotirasi kam qoldi</b>: ${OperatorRecordings.formatBytes(free)} bo‘sh.\n" +
+        "Guruhga yuborilgan ovoz yozuvlari telefondan avtomatik o‘chirilmoqda. Xotira to‘lsa, telefon qo‘ng‘iroqlarni yozmay qo‘yishi mumkin.", 1, editable = false)
+    }
+    if (free > 2 * OperatorRecordings.LOW_STORAGE_BYTES) prefs.edit().putBoolean("storage_low_alerted", false).apply()
   }
 
   private fun battery(chats: List<String>, now: Long) {
@@ -539,6 +564,7 @@ class OperatorSupervisor(private val context: Context, private val history: Oper
     lines.add("<b>Operator holati</b> · ${OperatorSchedule.clock(now, tz)}")
     lines.add("Versiya: ${OperatorReports.esc(env.appVersion)} · Batareya: ${if (batteryLevel >= 0) "$batteryLevel%" else "?"}" + if (charging) " (quvvatlanmoqda)" else "")
     lines.add("Internet: ${if (env.networkUp) "bor" else "yo‘q"} · Navbatdagi xabarlar: ${telegram.pending()}")
+    lines.add("Bo‘sh xotira: ${OperatorRecordings.formatBytes(OperatorRecordings.freeBytes())}")
     lines.add("POS: " + env.peers.joinToString(" · ") { (if (it.connected) "🟢 " else "🔴 ") + OperatorReports.esc(it.name) }.ifBlank { "qo‘shilmagan" })
     lines.add(if (slot == null) "⚪ Kafe yopiq" else "Smena: ${OperatorReports.esc(slot.shift.name)} (${OperatorSchedule.formatClock(slot.shift.startMinute)}–${OperatorSchedule.formatClock(slot.shift.endMinute)})" +
       (if (duty.isNotEmpty()) " · Menejer: ${duty.joinToString(", ")}" else ""))

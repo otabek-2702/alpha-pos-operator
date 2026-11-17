@@ -47,6 +47,15 @@ credentials may need one initial rescan.
   closed-hours SMS and alert timings (`/sozlamalar`, `/menejer_qosh`, `/guruh`,
   `/vaqt` …). App and bot writes both go through `OperatorConfigWriter`; the app
   reloads the stored configuration when its revision changes.
+- **Built-in owner** (2.2.2): Telegram account `1023732044` is always an owner
+  chat (`OperatorAdmin.OWNER_CHAT`) — no owner link needed. It gets a hello
+  message once per app version and low-storage alerts.
+- **Recording cleanup** (2.2.2): a recording file is deleted from the phone only
+  after Telegram confirmed it in the recordings group (state `sent` + message
+  ID), `recordingKeepDays` after sending (default 3, `/vaqt saqlash N`, 0–30).
+  With less than 1 GB free, confirmed recordings go after 30 minutes. Unsent,
+  pre-setup or changed files are never deleted. Resends reuse Telegram's
+  `file_id`. `/xotira` and `/holat` show free storage.
 - **Recordings** are sent with `sendAudio` (Telegram's inline player, no
   transcoding) as `+998…_yymmdd_hhmmss.m4a`, captioned with the managers on duty,
   direction, length, order, `#ovozDDMMYY` and the caller with the contact name.

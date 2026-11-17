@@ -57,6 +57,8 @@ export interface AlertConfig {
   managerAfterMinutes: number;
   lostAfterMinutes: number;
   smsDailyCap: number;
+  /** Days to keep recordings on the phone after Telegram confirmed them (0 = delete right away). */
+  recordingKeepDays?: number;
 }
 
 export interface OperatorConfiguration {
@@ -248,6 +250,7 @@ export function normalizeConfiguration(raw: Partial<OperatorConfiguration> | nul
       managerAfterMinutes: boundedInt(alerts.managerAfterMinutes, DEFAULT_ALERTS.managerAfterMinutes, 1, 60),
       lostAfterMinutes: boundedInt(alerts.lostAfterMinutes, 5, 1, 240),
       smsDailyCap: boundedInt(alerts.smsDailyCap, 50, 0, 500),
+      recordingKeepDays: boundedInt(alerts.recordingKeepDays, 3, 0, 30),
     },
     managers,
     ...(typeof value.adminInvite === 'string' && value.adminInvite ? { adminInvite: value.adminInvite } : {}),

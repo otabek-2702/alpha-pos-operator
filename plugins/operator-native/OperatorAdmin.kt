@@ -22,10 +22,11 @@ class OperatorAdmin(
   private fun admins(): JSONObject = try { JSONObject(prefs.getString("chats", "{}") ?: "{}") } catch (_: Exception) { JSONObject() }
 
   fun isAdmin(s: OperatorSettings, chatId: String): Boolean =
-    s.adminInvite.length >= 16 && admins().optString(chatId) == s.adminInvite
+    chatId == OWNER_CHAT || (s.adminInvite.length >= 16 && admins().optString(chatId) == s.adminInvite)
 
-  /** /start with the owner code; at most three owner chats per link. */
+  /** /start with the owner code; at most three owner chats per link. The built-in owner needs no link. */
   fun register(s: OperatorSettings, chatId: String, code: String): String? {
+    if (chatId == OWNER_CHAT) return "✅ Siz Smart Food Operator telefonining <b>boshqaruvchisi</b>siz (doimiy ulangan).\n\n$HELP"
     if (s.adminInvite.length < 16 || code != s.adminInvite) return null
     val chats = admins()
     val current = chats.keys().asSequence().filter { chats.optString(it) == s.adminInvite }.toList()
@@ -49,6 +50,7 @@ class OperatorAdmin(
       "/guruh" -> changeGroup(s, argument)
       "/yopiq_sms" -> closedSms(argument)
       "/vaqt" -> timing(argument)
+      "/xotira" -> storageText()
       "/boshqaruv", "/admin" -> HELP
       else -> null
     }
@@ -84,6 +86,8 @@ class OperatorAdmin(
     lines.add("🕒 Smenalar: " + s.shifts.joinToString(", ") { "${it.index}-smena ${OperatorSchedule.formatClock(it.startMinute)}–${OperatorSchedule.formatClock(it.endMinute)}" })
     lines.add("⏱ Menejerga xabar: ${s.managerAlertMs / 60_000} daq · Yo‘qotilgan: ${s.lostMs / 60_000} daq · SMS chegarasi: ${s.smsCap}/kun")
     lines.add("✉️ Yopiq vaqtdagi SMS: " + if (s.closedSmsEnabled) "yoqilgan" else "o‘chirilgan")
+    lines.add("🗑 Yuborilgan yozuvlar telefondan o‘chiriladi: " + (if (s.recordingKeepDays == 0) "darhol" else "${s.recordingKeepDays} kundan keyin") +
+      " · Bo‘sh xotira: ${OperatorRecordings.formatBytes(OperatorRecordings.freeBytes())}")
     val targets = s.config.optJSONArray("targets") ?: JSONArray()
     val pos = (0 until targets.length()).mapNotNull { targets.optJSONObject(it) }
       .joinToString(", ") { e(it.optString("name", "POS")) + if (it.optString("role") == "cashier") " (kassa)" else " (operator)" }
@@ -221,7 +225,7 @@ class OperatorAdmin(
   }
 
   private fun timing(argument: String): String {
-    val usage = "/vaqt menejer 2 · /vaqt yoqotilgan 5 · /vaqt sms 50"
+    val usage = "/vaqt menejer 2 · /vaqt yoqotilgan 5 · /vaqt sms 50 · /vaqt saqlash 3"
     val words = argument.trim().lowercase().split(Regex("\\s+"))
     require(words.size == 2) { "Yozilishi: $usage" }
     val n = words[1].toIntOrNull() ?: throw IllegalArgumentException("Son yozing. $usage")
@@ -229,6 +233,7 @@ class OperatorAdmin(
       "menejer" -> Triple("managerAfterMinutes", 1..60, "Menejerga xabar: $n daqiqa")
       "yoqotilgan", "yo‘qotilgan", "yo'qotilgan" -> Triple("lostAfterMinutes", 1..240, "Yo‘qotilgan mijoz: $n daqiqa")
       "sms" -> Triple("smsDailyCap", 0..500, "Kunlik SMS chegarasi: $n")
+      "saqlash" -> Triple("recordingKeepDays", 0..30, "Yuborilgan yozuvlar telefondan $n kundan keyin o‘chiriladi")
       else -> throw IllegalArgumentException("Yozilishi: $usage")
     }
     require(n in range) { "Qiymat ${range.first}–${range.last} oralig‘ida bo‘lsin" }
@@ -236,7 +241,18 @@ class OperatorAdmin(
     return "✅ $text."
   }
 
+  private fun storageText(): String {
+    val free = OperatorRecordings.freeBytes()
+    val total = OperatorRecordings.totalBytes()
+    val stats = OperatorRecordings(context).cleanupStats()
+    return "💾 <b>Telefon xotirasi</b>\nBo‘sh: ${OperatorRecordings.formatBytes(free)} / ${OperatorRecordings.formatBytes(total)}\n" +
+      "O‘chirilgan yozuvlar: ${stats.first} ta (${OperatorRecordings.formatBytes(stats.second)})"
+  }
+
   companion object {
+    /** The owner's own Telegram account is always connected; no owner link needed. */
+    const val OWNER_CHAT = "1023732044"
+
     const val HELP = "<b>Boshqaruv buyruqlari</b>\n" +
       "/sozlamalar — hozirgi sozlamalar\n" +
       "/menejerlar — menejerlar ro‘yxati\n" +
@@ -247,6 +263,8 @@ class OperatorAdmin(
       "/guruh ovoz|hisobot|zaxira -100… — guruhni almashtirish\n" +
       "/yopiq_sms ha|yoq — yopiq vaqtdagi SMS\n" +
       "/vaqt menejer 2 · /vaqt yoqotilgan 5 · /vaqt sms 50\n" +
+      "/vaqt saqlash 3 — yuborilgan yozuvlarni telefondan necha kundan keyin o‘chirish (0 = darhol)\n" +
+      "/xotira — telefon xotirasi\n" +
       "/holat · /hisobot · /raqam 901234567"
   }
 }

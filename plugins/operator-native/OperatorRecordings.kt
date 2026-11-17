@@ -9,6 +9,7 @@ import android.database.sqlite.SQLiteOpenHelper
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.os.StatFs
 import android.provider.DocumentsContract
 import androidx.core.content.ContextCompat
 import org.json.JSONObject
@@ -20,7 +21,7 @@ import java.util.UUID
 data class OperatorAudioFile(val uri: String, val name: String, val size: Long, val modified: Long)
 
 /** Durable outbox. A successful initial folder inventory is REQUIRED before configuration saves. */
-class OperatorRecordings(private val context: Context, private val inventorySource: ((String) -> List<OperatorAudioFile>)? = null) : SQLiteOpenHelper(context, "operator_recordings_v1.db", null, 1) {
+class OperatorRecordings(private val context: Context, private val inventorySource: ((String) -> List<OperatorAudioFile>)? = null) : SQLiteOpenHelper(context, "operator_recordings_v1.db", null, 2) {
   companion object {
     val lock = Any()
     private val AUDIO = setOf("m4a", "mp3", "amr", "aac", "wav", "ogg", "opus", "3gp", "flac", "mp4")
@@ -41,13 +42,28 @@ class OperatorRecordings(private val context: Context, private val inventorySour
       require(folder.path.startsWith(storageRoot().path + File.separator)) { "Yozuvlar papkasi telefon xotirasida bo'lishi kerak" }
       return folder
     }
+
+    /** Below this much free space sent recordings are deleted without waiting for the retention period. */
+    const val LOW_STORAGE_BYTES = 1_000_000_000L
+    private const val MIN_KEEP_MS = 30 * 60_000L
+
+    fun freeBytes(): Long = try { StatFs(Environment.getExternalStorageDirectory().path).availableBytes } catch (_: Exception) { -1L }
+    fun totalBytes(): Long = try { StatFs(Environment.getExternalStorageDirectory().path).totalBytes } catch (_: Exception) { -1L }
+
+    fun formatBytes(bytes: Long): String = when {
+      bytes < 0 -> "?"
+      bytes >= 1_000_000_000L -> String.format(Locale.ROOT, "%.1f GB", bytes / 1e9)
+      else -> String.format(Locale.ROOT, "%.0f MB", bytes / 1e6)
+    }
   }
 
   override fun onCreate(db: SQLiteDatabase) {
-    db.execSQL("CREATE TABLE recordings (baseline TEXT NOT NULL, uri TEXT NOT NULL, name TEXT NOT NULL, size INTEGER NOT NULL, modified INTEGER NOT NULL, first_seen INTEGER NOT NULL, stable_since INTEGER NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_attempt INTEGER NOT NULL DEFAULT 0, sent_at INTEGER, message_id INTEGER, error TEXT, PRIMARY KEY(baseline,uri))")
+    db.execSQL("CREATE TABLE recordings (baseline TEXT NOT NULL, uri TEXT NOT NULL, name TEXT NOT NULL, size INTEGER NOT NULL, modified INTEGER NOT NULL, first_seen INTEGER NOT NULL, stable_since INTEGER NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_attempt INTEGER NOT NULL DEFAULT 0, sent_at INTEGER, message_id INTEGER, error TEXT, deleted_at INTEGER, PRIMARY KEY(baseline,uri))")
     db.execSQL("CREATE INDEX recordings_queue ON recordings(baseline,state,next_attempt)")
   }
-  override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+  override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+    if (oldVersion < 2) db.execSQL("ALTER TABLE recordings ADD COLUMN deleted_at INTEGER")
+  }
 
   fun inventory(folder: String): List<OperatorAudioFile> {
     inventorySource?.let { return it(folder) }
@@ -220,6 +236,62 @@ class OperatorRecordings(private val context: Context, private val inventorySour
     writableDatabase.update("recordings", ContentValues().apply {
       put("state", "sent"); put("sent_at", System.currentTimeMillis()); put("message_id", messageId); putNull("error")
     }, "uri=? AND state='queued'", arrayOf(uri))
+  }
+
+  /**
+   * Frees phone storage: deletes recording files that Telegram confirmed in the recordings group
+   * (state 'sent' with a message ID) once they are older than [keepDays]. When the phone is almost
+   * full, confirmed recordings go after [MIN_KEEP_MS]. Unsent, ignored (pre-setup) or changed files
+   * are never deleted. Returns how many files were deleted.
+   */
+  fun cleanupSent(keepDays: Int, now: Long = System.currentTimeMillis()): Int = synchronized(lock) {
+    val lowStorage = freeBytes().let { it in 0 until LOW_STORAGE_BYTES }
+    val keepMs = if (lowStorage) MIN_KEEP_MS else maxOf(keepDays.toLong() * 86_400_000L, MIN_KEEP_MS)
+    val rows = ArrayList<Triple<String, String, Long>>()
+    readableDatabase.rawQuery("SELECT baseline,uri,size FROM recordings WHERE state='sent' AND message_id IS NOT NULL AND deleted_at IS NULL AND sent_at<? ORDER BY sent_at LIMIT 500",
+      arrayOf((now - keepMs).toString())).use {
+      while (it.moveToNext()) rows.add(Triple(it.getString(0), it.getString(1), it.getLong(2)))
+    }
+    var deleted = 0
+    for ((baseline, uri, size) in rows) {
+      val removed = try { deleteFile(uri, size) } catch (_: Exception) { null }
+      // null = could not delete now (retry next time); false = missing or changed (never touch again).
+      if (removed == null) continue
+      if (removed) deleted++
+      writableDatabase.update("recordings", ContentValues().apply { put("deleted_at", if (removed) now else -1L) },
+        "baseline=? AND uri=?", arrayOf(baseline, uri))
+    }
+    deleted
+  }
+
+  /** Deleted file count and bytes, for /xotira. */
+  fun cleanupStats(): Pair<Int, Long> = synchronized(lock) {
+    readableDatabase.rawQuery("SELECT COUNT(*),COALESCE(SUM(size),0) FROM recordings WHERE deleted_at>0", null).use {
+      if (it.moveToFirst()) it.getInt(0) to it.getLong(1) else 0 to 0L
+    }
+  }
+
+  private fun deleteFile(uri: String, size: Long): Boolean? {
+    val parsed = Uri.parse(uri)
+    if (parsed.scheme == "file") {
+      if (!hasAllFilesAccess(context)) return null
+      val file = File(parsed.path ?: return false).canonicalFile
+      if (!file.path.startsWith(storageRoot().path + File.separator) || !isAudio(file.name)) return false
+      if (!file.exists()) return false
+      if (size >= 0 && file.length() != size) return false
+      if (!file.delete()) return null
+      try { android.media.MediaScannerConnection.scanFile(context, arrayOf(file.path), null, null) } catch (_: Exception) { }
+      return true
+    }
+    if (parsed.scheme == "content") {
+      val current = try {
+        context.contentResolver.query(parsed, arrayOf(DocumentsContract.Document.COLUMN_SIZE), null, null, null)?.use { if (it.moveToFirst() && !it.isNull(0)) it.getLong(0) else -1L }
+      } catch (_: java.io.FileNotFoundException) { return false }
+      if (current == null) return false
+      if (size >= 0 && current >= 0 && current != size) return false
+      return if (DocumentsContract.deleteDocument(context.contentResolver, parsed)) true else null
+    }
+    return false
   }
 
   private fun error(message: String) = OperatorRuntimeStore.update(context) { it.put("telegramError", message) }

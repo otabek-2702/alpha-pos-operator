@@ -95,7 +95,8 @@ object OperatorConfigWriter {
     }
     value.optJSONObject("closedSms")?.let { require(it.optString("text").length <= 300) { "SMS matni 300 belgidan oshmasin" } }
     value.optJSONObject("alerts")?.let {
-      require(it.optInt("managerAfterMinutes", 1) in 1..60 && it.optInt("lostAfterMinutes", 5) in 1..240 && it.optInt("smsDailyCap", 50) in 0..500) { "Ogohlantirish vaqtlari noto'g'ri" }
+      require(it.optInt("managerAfterMinutes", 1) in 1..60 && it.optInt("lostAfterMinutes", 5) in 1..240 && it.optInt("smsDailyCap", 50) in 0..500 &&
+        it.optInt("recordingKeepDays", 3) in 0..30) { "Ogohlantirish vaqtlari noto'g'ri" }
     }
     value.optJSONArray("managers")?.let { managers ->
       require(managers.length() <= 30) { "Ko'pi bilan 30 ta menejer qo'shish mumkin" }

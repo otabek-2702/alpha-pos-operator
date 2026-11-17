@@ -169,9 +169,12 @@ class OperatorTelegram(
           response = transport.json(token, "editMessageCaption", captionBody(row).put("message_id", row.messageId))
         } else {
           val primaryFile = row.primary?.let { primaryState(row.key, it) }
-          if (primaryFile?.fileId != null) {
-            response = if (isAudio(row)) transport.json(token, "sendAudio", audioFields(row, captionBody(row).put("audio", primaryFile.fileId)))
-              else transport.json(token, "sendDocument", captionBody(row).put("document", primaryFile.fileId))
+          // An earlier upload's file_id (main chat, or this row before its message was deleted):
+          // the phone may have already removed the recording file to free storage.
+          val knownFileId = primaryFile?.fileId ?: row.fileId
+          if (knownFileId != null) {
+            response = if (isAudio(row)) transport.json(token, "sendAudio", audioFields(row, captionBody(row).put("audio", knownFileId)))
+              else transport.json(token, "sendDocument", captionBody(row).put("document", knownFileId))
           } else if (primaryFile != null && !primaryFile.sent && primaryFile.attempts < 3) {
             defer(row, 15, null)   // Wait for the main chat's upload, then reuse its file.
             return false

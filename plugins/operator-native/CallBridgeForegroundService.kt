@@ -152,10 +152,17 @@ class CallBridgeForegroundService : Service() {
     retryPendingNow()
   }
 
+  @Volatile private var lastCleanupAt = 0L
+
   private fun processRecordings() {
     try {
       val telegram = config.optJSONObject("telegram") ?: return
       recordings.scan(telegram, callInProgress, hasPhonePermissions)
+      val now = System.currentTimeMillis()
+      if (now - lastCleanupAt >= 10 * 60_000L) {
+        lastCleanupAt = now
+        try { recordings.cleanupSent(OperatorSettings(config, emptyMap()).recordingKeepDays, now) } catch (_: Exception) { }
+      }
     } catch (_: Exception) {
       OperatorRuntimeStore.update(this) { it.put("telegramError", "Yozuvlarni tekshirishda xato; papka va ruxsatlarni tekshiring") }
     }

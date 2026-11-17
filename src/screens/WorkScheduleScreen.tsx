@@ -85,7 +85,7 @@ export function WorkScheduleScreen({ shifts: savedShifts, closedSms, alerts, ope
       await onSave({
         shifts: shifts.map((s) => ({ ...s, name: s.name.trim(), start: s.start.trim().padStart(5, '0'), end: s.end.trim().padStart(5, '0') })),
         closedSms: { enabled: smsEnabled, text: smsText.trim() },
-        alerts: { managerAfterMinutes: manager, lostAfterMinutes: lost, smsDailyCap: cap },
+        alerts: { ...alerts, managerAfterMinutes: manager, lostAfterMinutes: lost, smsDailyCap: cap },
       });
       setSaved(true);
     } catch (failure) {
